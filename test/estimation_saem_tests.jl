@@ -924,6 +924,52 @@ end
     @test res isa FitResult
 end
 
+@testset "SAEM builtin_stats skips missing normal outcomes (regression)" begin
+    model = @Model begin
+        @covariates begin
+            t = Covariate()
+        end
+
+        @fixedEffects begin
+            a = RealNumber(0.1)
+            b = RealNumber(0.2)
+            σ1 = RealNumber(0.4, scale=:log)
+            σ2 = RealNumber(0.3, scale=:log)
+            τ = RealNumber(0.3, scale=:log)
+        end
+
+        @randomEffects begin
+            η = RandomEffect(Normal(0.0, τ); column=:ID)
+        end
+
+        @formulas begin
+            y1 ~ Normal(a + η, σ1)
+            y2 ~ Normal(b + η, σ2)
+        end
+    end
+
+    df = DataFrame(
+        ID = [:A, :A, :B, :B],
+        t = [0.0, 1.0, 0.0, 1.0],
+        y1 = Union{Missing, Float64}[0.1, missing, 0.0, -0.1],
+        y2 = Union{Missing, Float64}[missing, 0.25, 0.05, missing]
+    )
+
+    dm = DataModel(model, df; primary_id=:ID, time_col=:t)
+    res = fit_model(dm, NoLimits.SAEM(; sampler=MH(), turing_kwargs=(n_samples=5, n_adapt=0, progress=false),
+                             max_store=4,
+                             maxiters=2,
+                             builtin_stats=:closed_form,
+                             resid_var_param=(; y1=:σ1, y2=:σ2),
+                             re_cov_params=(; η=:τ)))
+    @test res isa FitResult
+    notes = NoLimits.get_notes(res)
+    @test notes.builtin_stats_mode_effective == :closed_form
+    @test :builtin_stats in notes.closed_form_mstep_sources
+    θ = NoLimits.get_params(res; scale=:untransformed)
+    @test θ.σ1 > 0 && θ.σ2 > 0 && θ.τ > 0
+end
+
 @testset "SAEM builtin_stats gaussian_re falls back for non-Normal outcomes" begin
     model = @Model begin
         @covariates begin
@@ -1288,6 +1334,59 @@ end
     @test notes_ineligible.builtin_stats_closed_form_eligibility.hmm_outcomes == (:y,)
     @test !NoLimits.get_closed_form_mstep_used(res_ineligible)
     @test notes_ineligible.closed_form_mstep_mode == :numeric_only
+end
+
+@testset "SAEM builtin_stats HMM emission handles fully missing rows (regression)" begin
+    model = @Model begin
+        @helpers begin
+            create_trans_pi0(eta_hmm, eta_initial) = _saem_test_create_trans_pi0(eta_hmm, eta_initial)
+        end
+
+        @covariates begin
+            t = Covariate()
+        end
+
+        @fixedEffects begin
+            mean_transitions = RealVector([0.0, 0.0])
+            mean_initial = RealNumber(0.0)
+            omega_hmm = RealVector([0.3, 0.3], scale=fill(:log, 2))
+            omega_initial = RealNumber(0.3, scale=:log)
+            eta_theta = RealVector(fill(0.6, 4), scale=fill(:logit, 4))
+        end
+
+        @randomEffects begin
+            eta_hmm = RandomEffect(MvNormal(mean_transitions, Diagonal(omega_hmm)); column=:ID)
+            eta_initial = RandomEffect(Normal(mean_initial, omega_initial); column=:ID)
+        end
+
+        @formulas begin
+            trans_pi0 = create_trans_pi0(eta_hmm, [eta_initial])
+            theta_mat = reshape(eta_theta, 2, 2)
+            emissions = ntuple(s -> ntuple(j -> Bernoulli(theta_mat[s, j]), 2), 2)
+            y ~ MVDiscreteTimeDiscreteStatesHMM(trans_pi0[1], emissions, Categorical(trans_pi0[2]))
+        end
+    end
+
+    df = DataFrame(
+        ID = [:A, :A, :B, :B],
+        t = [0.0, 1.0, 0.0, 1.0],
+        y = Any[[1, 0], missing, [1, 1], [0, 0]]
+    )
+
+    dm = DataModel(model, df; primary_id=:ID, time_col=:t)
+    res = fit_model(dm, NoLimits.SAEM(;
+                              sampler=MH(),
+                              turing_kwargs=(n_samples=3, n_adapt=0, progress=false),
+                              mcmc_steps=1,
+                              max_store=4,
+                              maxiters=2,
+                              progress=false,
+                              builtin_stats=:auto);
+                        store_eb_modes=false)
+    @test res isa FitResult
+    notes = NoLimits.get_notes(res)
+    @test notes.builtin_stats_mode_effective == :closed_form
+    @test :builtin_stats in notes.closed_form_mstep_sources
 end
 
 @testset "SAEM builtin_stats auto detects lts_random_no_cv full closed-form coverage" begin

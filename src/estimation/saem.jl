@@ -842,6 +842,11 @@ end
 
 @inline function _saem_hmm_state_emission_probs(dist::MVDiscreteTimeDiscreteStatesHMM, y, T::Type)
     probs = Vector{T}(undef, dist.n_states)
+    if ismissing(y)
+        fill!(probs, one(T))
+        return probs
+    end
+    y isa AbstractVector || return nothing
     for k in 1:dist.n_states
         v = _mv_emission_logpdf(dist.emission_dists[k], y)
         probs[k] = isfinite(v) ? exp(T(v)) : zero(T)
@@ -945,6 +950,9 @@ function _saem_hmm_bernoulli_stats_from_sequence(dists::Vector, ys::Vector, targ
     sum_wy = zeros(T, K, M)
     for t in eachindex(ys)
         y = ys[t]
+        if ismissing(y)
+            continue
+        end
         y isa AbstractVector || return (nothing, false)
         length(y) == M || return (nothing, false)
         for m in 1:M
@@ -1072,6 +1080,7 @@ function _saem_collect_hmm_stats_individual(dm::DataModel,
 end
 
 function _saem_push_outcome_stat(prev, dist, y, T::Type)
+    ismissing(y) && return prev
     family = _saem_outcome_family(dist)
     family == :unsupported && return nothing
     yy = T(y)
@@ -1207,6 +1216,7 @@ function _saem_collect_outcome_stats_individual(dm::DataModel,
             dist = getproperty(obs, col)
             _saem_outcome_family(dist) == :unsupported && continue
             y = getfield(obs_series, col)[i]
+            ismissing(y) && continue
             prev = get(stats_dict, col, nothing)
             nxt = _saem_push_outcome_stat(prev, dist, y, Tstats)
             nxt === nothing && return (NamedTuple(), false)
