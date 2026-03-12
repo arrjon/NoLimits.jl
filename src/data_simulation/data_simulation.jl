@@ -133,6 +133,7 @@ function _simulate_individual!(df::DataFrame, dm::DataModel, idx::Int, θ, re_sa
 
     obs_cols = dm.config.obs_cols
     rowwise_re = _needs_rowwise_random_effects(dm, idx; obs_only=true)
+    hmm_states = Dict{Symbol, Int}()
     for (i, row) in enumerate(obs_rows)
         vary = _varying_at(dm, ind, i, row)
         η_row = _row_random_effects_at(dm, idx, i, η, rowwise_re; obs_only=true)
@@ -140,11 +141,23 @@ function _simulate_individual!(df::DataFrame, dm::DataModel, idx::Int, θ, re_sa
               calculate_formulas_obs(model, θ, η_row, const_cov, vary) :
               calculate_formulas_obs(model, θ, η_row, const_cov, vary, sol_accessors)
         for col in obs_cols
-            if !replace_missings && ismissing(df[row, col])
-                continue
-            end
             dist = getproperty(obs, col)
-            val = rand(rng, dist)
+            if _is_hmm_dist(dist)
+                prev_state = get(hmm_states, col, 0)
+                state = prev_state == 0 ?
+                        _sample_hmm_hidden_state(rng, dist) :
+                        _sample_hmm_hidden_state(rng, dist, prev_state)
+                hmm_states[col] = state
+                if !replace_missings && ismissing(df[row, col])
+                    continue
+                end
+                val = _hmm_emission_rand(rng, dist, state)
+            else
+                if !replace_missings && ismissing(df[row, col])
+                    continue
+                end
+                val = rand(rng, dist)
+            end
             if val isa Number && (isnan(val) || isinf(val))
                 _warn_bad_value(dm, row, col, dist, val)
             end
@@ -209,6 +222,7 @@ function _simulate_individual_values(dm::DataModel, idx::Int, θ, re_samples, rn
     end
 
     rowwise_re = _needs_rowwise_random_effects(dm, idx; obs_only=true)
+    hmm_states = Dict{Symbol, Int}()
     for (i, row) in enumerate(obs_rows)
         vary = _varying_at(dm, ind, i, row)
         η_row = _row_random_effects_at(dm, idx, i, η, rowwise_re; obs_only=true)
@@ -216,12 +230,25 @@ function _simulate_individual_values(dm::DataModel, idx::Int, θ, re_samples, rn
               calculate_formulas_obs(model, θ, η_row, const_cov, vary) :
               calculate_formulas_obs(model, θ, η_row, const_cov, vary, sol_accessors)
         for col in obs_cols
-            if !replace_missings && ismissing(dm.df[row, col])
-                out[col][i] = nothing
-                continue
-            end
             dist = getproperty(obs, col)
-            val = rand(rng, dist)
+            if _is_hmm_dist(dist)
+                prev_state = get(hmm_states, col, 0)
+                state = prev_state == 0 ?
+                        _sample_hmm_hidden_state(rng, dist) :
+                        _sample_hmm_hidden_state(rng, dist, prev_state)
+                hmm_states[col] = state
+                if !replace_missings && ismissing(dm.df[row, col])
+                    out[col][i] = nothing
+                    continue
+                end
+                val = _hmm_emission_rand(rng, dist, state)
+            else
+                if !replace_missings && ismissing(dm.df[row, col])
+                    out[col][i] = nothing
+                    continue
+                end
+                val = rand(rng, dist)
+            end
             if val isa Number && (isnan(val) || isinf(val))
                 _warn_bad_value(dm, row, col, dist, val)
             end

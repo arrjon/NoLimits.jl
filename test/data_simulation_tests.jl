@@ -501,3 +501,90 @@ end
     @test isapprox(sim.y[4], sim.η_year[4]; atol=1.0e-3)
     @test isapprox(sim.y[5], sim.η_year[5]; atol=1.0e-3)
 end
+
+@testset "simulate_data propagates discrete HMM hidden states forward" begin
+    model = @Model begin
+        @fixedEffects begin
+            dummy = RealNumber(0.0)
+        end
+
+        @covariates begin
+            t = Covariate()
+        end
+
+        @formulas begin
+            P = [0.6 0.4 0.0;
+                 0.0 0.7 0.3;
+                 0.0 0.0 1.0]
+            y ~ DiscreteTimeDiscreteStatesHMM(
+                P,
+                (
+                    Categorical([1.0, 0.0, 0.0]),
+                    Categorical([0.0, 1.0, 0.0]),
+                    Categorical([0.0, 0.0, 1.0]),
+                ),
+                Categorical([1.0, 0.0, 0.0]),
+            )
+        end
+    end
+
+    n_id = 200
+    n_t = 6
+    df = DataFrame(
+        ID = repeat(1:n_id; inner=n_t),
+        t = repeat(collect(0.0:(n_t - 1)); outer=n_id),
+        y = ones(Int, n_id * n_t),
+    )
+
+    dm = DataModel(model, df; primary_id=:ID, time_col=:t)
+    sim = simulate_data(dm; rng=MersenneTwister(123))
+    paths = [Vector{Int}(sim.y[sim.ID .== id]) for id in 1:n_id]
+
+    @test all(path -> all(diff(path) .>= 0), paths)
+    @test any(path -> any(==(3), path), paths)
+end
+
+@testset "simulate_data propagates continuous-time HMM hidden states forward" begin
+    model = @Model begin
+        @fixedEffects begin
+            dummy = RealNumber(0.0)
+        end
+
+        @covariates begin
+            t = Covariate()
+            dt = Covariate()
+        end
+
+        @formulas begin
+            Q = [-1.2 1.2 0.0;
+                  0.0 -1.0 1.0;
+                  0.0 0.0 0.0]
+            y ~ ContinuousTimeDiscreteStatesHMM(
+                Q,
+                (
+                    Categorical([1.0, 0.0, 0.0]),
+                    Categorical([0.0, 1.0, 0.0]),
+                    Categorical([0.0, 0.0, 1.0]),
+                ),
+                Categorical([1.0, 0.0, 0.0]),
+                dt,
+            )
+        end
+    end
+
+    n_id = 200
+    n_t = 6
+    df = DataFrame(
+        ID = repeat(1:n_id; inner=n_t),
+        t = repeat(collect(0.0:(n_t - 1)); outer=n_id),
+        dt = ones(n_id * n_t),
+        y = ones(Int, n_id * n_t),
+    )
+
+    dm = DataModel(model, df; primary_id=:ID, time_col=:t)
+    sim = simulate_data(dm; rng=MersenneTwister(123))
+    paths = [Vector{Int}(sim.y[sim.ID .== id]) for id in 1:n_id]
+
+    @test all(path -> all(diff(path) .>= 0), paths)
+    @test any(path -> any(==(3), path), paths)
+end

@@ -207,6 +207,7 @@ function _simulate_obs(dm::DataModel,
             sol_accessors = get_de_accessors_builder(dm.model.de.de)(sol, compiled)
         end
         vals = Vector{Float64}(undef, length(obs_rows))
+        hmm_prev_state = 0
         for (j, row) in enumerate(obs_rows)
             vary = _varying_at_plot(dm, ind, j, row)
             η_row = _row_random_effects_at(dm, i, j, η_ind, rowwise_re; obs_only=true)
@@ -214,7 +215,15 @@ function _simulate_obs(dm::DataModel,
                   calculate_formulas_obs(dm.model, θ, η_row, ind.const_cov, vary) :
                   calculate_formulas_obs(dm.model, θ, η_row, ind.const_cov, vary, sol_accessors)
             dist = getproperty(obs, obs_name)
-            vals[j] = rand(rng, dist)
+            if _is_hmm_dist(dist)
+                state = hmm_prev_state == 0 ?
+                        _sample_hmm_hidden_state(rng, dist) :
+                        _sample_hmm_hidden_state(rng, dist, hmm_prev_state)
+                hmm_prev_state = state
+                vals[j] = _float_if_real(_hmm_emission_rand(rng, dist, state))
+            else
+                vals[j] = rand(rng, dist)
+            end
         end
         sim_vals[i] = vals
     end
