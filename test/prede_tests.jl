@@ -1,6 +1,7 @@
 using Test
 using NoLimits
 using ComponentArrays
+using Lux
 
 @testset "PreDifferentialEquation macro" begin
     # Builds preDE values from fixed/random effects and helpers.

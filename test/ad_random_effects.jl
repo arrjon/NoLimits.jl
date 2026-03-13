@@ -6,6 +6,7 @@ using Zygote
 using ComponentArrays
 using Distributions
 using Lux
+using LinearAlgebra
 
 @testset "RandomEffects AD" begin
     # Distribution creation + logpdf are AD-compatible across backends.

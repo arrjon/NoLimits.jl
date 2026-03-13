@@ -30,13 +30,15 @@ end
     if ll_cache isa Vector
         return ll_cache
     elseif ll_cache isa _LLCache
-        return build_ll_cache(dm;
-                              ode_args=ll_cache.ode_args,
-                              ode_kwargs=ll_cache.ode_kwargs,
-                              force_saveat=ll_cache.saveat_cache !== nothing,
-                              nthreads=nthreads)
+        caches = build_ll_cache(dm;
+                                ode_args=ll_cache.ode_args,
+                                ode_kwargs=ll_cache.ode_kwargs,
+                                force_saveat=ll_cache.saveat_cache !== nothing,
+                                nthreads=nthreads)
+        return caches isa Vector ? caches : [caches]
     else
-        return build_ll_cache(dm; nthreads=nthreads)
+        caches = build_ll_cache(dm; nthreads=nthreads)
+        return caches isa Vector ? caches : [caches]
     end
 end
 

@@ -5,6 +5,7 @@ using ForwardDiff
 using Zygote
 using ComponentArrays
 using Distributions
+using LinearAlgebra
 
 @testset "RandomEffects value AD" begin
     # AD wrt random-effects values.

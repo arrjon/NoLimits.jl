@@ -5,6 +5,7 @@ using ForwardDiff
 using Zygote
 using ComponentArrays
 using Distributions
+using Lux
 
 @testset "FixedEffects builders AD" begin
     # AD through model function builders on transformed scale.

@@ -972,16 +972,44 @@ function _loglikelihood_individual(dm::DataModel, idx::Int, θ, η_ind, cache::_
             if dist isa ContinuousTimeDiscreteStatesHMM || dist isa MVContinuousTimeDiscreteStatesHMM ||
                dist isa DiscreteTimeDiscreteStatesHMM || dist isa MVDiscreteTimeDiscreteStatesHMM
                 prior = get(hmm_priors, col, nothing)
-                dist_use = _hmm_with_prior(dist, prior)
+                dist_use = try
+                    _hmm_with_prior(dist, prior)
+                catch err
+                    if err isa DomainError || err isa ArgumentError
+                        return -Inf
+                    end
+                    rethrow(err)
+                end
                 if y === missing
-                    hmm_priors[col] = probabilities_hidden_states(dist_use)
+                    hmm_priors[col] = try
+                        probabilities_hidden_states(dist_use)
+                    catch err
+                        if err isa DomainError || err isa ArgumentError
+                            return -Inf
+                        end
+                        rethrow(err)
+                    end
                     continue
                 end
-                v = logpdf(dist_use, y)
+                v = try
+                    logpdf(dist_use, y)
+                catch err
+                    if err isa DomainError || err isa ArgumentError
+                        return -Inf
+                    end
+                    rethrow(err)
+                end
                 if !isfinite(v)
                     return -Inf
                 end
-                hmm_priors[col] = posterior_hidden_states(dist_use, y)
+                hmm_priors[col] = try
+                    posterior_hidden_states(dist_use, y)
+                catch err
+                    if err isa DomainError || err isa ArgumentError
+                        return -Inf
+                    end
+                    rethrow(err)
+                end
             else
                 y === missing && continue
                 v = _fast_logpdf(dist, y)
@@ -1321,7 +1349,13 @@ function loglikelihood(dm::DataModel, θ::ComponentArray, η;
     n = length(dm.individuals)
     if serialization isa SciMLBase.EnsembleThreads
         nthreads = Threads.maxthreadid()
-        caches = cache isa Vector ? cache : build_ll_cache(dm; ode_args=ode_args, ode_kwargs=ode_kwargs, nthreads=nthreads)
+        caches = if cache isa Vector
+            cache
+        else
+            built = cache isa _LLCache ? cache :
+                    build_ll_cache(dm; ode_args=ode_args, ode_kwargs=ode_kwargs, nthreads=nthreads)
+            built isa Vector ? built : [built]
+        end
         T = eltype(θ)
         by_individual = Vector{T}(undef, n)
         bad = Threads.Atomic{Bool}(false)

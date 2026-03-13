@@ -3,6 +3,8 @@ using DataFrames
 using NoLimits
 using ComponentArrays
 using Random
+using Distributions
+using LinearAlgebra
 
 @testset "Hutchinson logdet gradient approximates trace" begin
     Random.seed!(1234)

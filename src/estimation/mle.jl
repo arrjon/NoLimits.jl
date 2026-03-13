@@ -157,7 +157,12 @@ function _fit_no_re(dm::DataModel, method;
         error("BlackBoxOptim methods require finite lower and upper bounds for all free parameters.")
     end
     if parentmodule(typeof(method.optimizer)) === OptimizationBBO
-        θ0_init = collect(θ0_free_t)
+        # Intersect user-provided bounds with model hard bounds so BBO
+        # never proposes parameter values that violate model constraints.
+        # (BBO ignores x0 and uses a random population within [lb,ub].)
+        lb = map((u, m) -> isfinite(m) ? max(u, m) : u, collect(lb), lower_t_free_vec)
+        ub = map((u, m) -> isfinite(m) ? min(u, m) : u, collect(ub), upper_t_free_vec)
+        θ0_init = clamp.(collect(θ0_free_t), lb, ub)
     else
         θ0_init = θ0_free_t
     end
