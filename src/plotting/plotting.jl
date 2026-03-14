@@ -1422,7 +1422,8 @@ function _default_random_effects(res::FitResult,
     re_names = get_re_names(dm.model.random.random)
     isempty(re_names) && return fill(ComponentArray(NamedTuple()), length(dm.individuals))
 
-    if res.result isa LaplaceResult || res.result isa LaplaceMAPResult || res.result isa FOCEIResult || res.result isa FOCEIMAPResult
+    if res.result isa LaplaceResult || res.result isa LaplaceMAPResult || res.result isa FOCEIResult || res.result isa FOCEIMAPResult ||
+       res.result isa SparseGridResult || res.result isa SparseGridMAPResult
         _, batch_infos, _ = _build_laplace_batch_infos(dm, constants_re)
         bstars = res.result.eb_modes
         length(bstars) == length(batch_infos) || error("Laplace-style EB modes do not match number of batches.")

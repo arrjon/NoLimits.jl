@@ -529,8 +529,8 @@ function get_laplace_random_effects(dm::DataModel,
                                     constants_re::NamedTuple=NamedTuple(),
                                     flatten::Bool=true,
                                     include_constants::Bool=true)
-    (res.result isa LaplaceResult || res.result isa LaplaceMAPResult || res.result isa FOCEIResult || res.result isa FOCEIMAPResult) ||
-        error("Laplace-style random-effects accessor requires a Laplace, LaplaceMAP, FOCEI, or FOCEIMAP fit result.")
+    (res.result isa LaplaceResult || res.result isa LaplaceMAPResult || res.result isa FOCEIResult || res.result isa FOCEIMAPResult || res.result isa SparseGridResult || res.result isa SparseGridMAPResult) ||
+        error("Laplace-style random-effects accessor requires a Laplace, LaplaceMAP, FOCEI, FOCEIMAP, SparseGrid, or SparseGridMAP fit result.")
     constants_re = _res_constants_re(res, constants_re)
     re_names = get_re_names(dm.model.random.random)
     isempty(re_names) && return NamedTuple()
@@ -669,7 +669,7 @@ function get_random_effects(dm::DataModel,
                             flatten::Bool=true,
                             include_constants::Bool=true)
     constants_re = _res_constants_re(res, constants_re)
-    if res.result isa LaplaceResult || res.result isa LaplaceMAPResult || res.result isa FOCEIResult || res.result isa FOCEIMAPResult
+    if res.result isa LaplaceResult || res.result isa LaplaceMAPResult || res.result isa FOCEIResult || res.result isa FOCEIMAPResult || res.result isa SparseGridResult || res.result isa SparseGridMAPResult
         return get_laplace_random_effects(dm, res; constants_re=constants_re, flatten=flatten, include_constants=include_constants)
     end
     if res.result isa MCEMResult
@@ -748,12 +748,25 @@ function get_loglikelihood(dm::DataModel,
     θu = get_params(res; scale=:untransformed)
     if res.result isa MLEResult || res.result isa MAPResult
         return loglikelihood(dm, θu, ComponentArray(); ode_args=ode_args, ode_kwargs=ode_kwargs, serialization=serialization)
-    elseif res.result isa LaplaceResult || res.result isa LaplaceMAPResult || res.result isa FOCEIResult || res.result isa FOCEIMAPResult
+    elseif res.result isa LaplaceResult || res.result isa LaplaceMAPResult || res.result isa FOCEIResult || res.result isa FOCEIMAPResult || res.result isa SparseGridMAPResult
         pairing, batch_infos, const_cache = _build_laplace_batch_infos(dm, constants_re)
         bstars = res.result.eb_modes
         length(bstars) == length(batch_infos) || error("Laplace-style EB modes do not match number of batches.")
         η_vec = _eta_from_eb(dm, batch_infos, bstars, const_cache, θu)
         return loglikelihood(dm, θu, η_vec; ode_args=ode_args, ode_kwargs=ode_kwargs, serialization=serialization)
+    elseif res.result isa SparseGridResult || res.result isa SparseGridMAPResult
+        # Re-evaluate the sparse-grid marginal log-likelihood at the estimated θ.
+        level = res.method.level
+        ll_cache = build_ll_cache(dm; ode_args=ode_args, ode_kwargs=ode_kwargs, force_saveat=true)
+        _, batch_infos, const_cache = _build_laplace_batch_infos(dm, constants_re)
+        θu_re = _symmetrize_psd_params(θu, dm.model.fixed.fixed)
+        total = 0.0
+        for info in batch_infos
+            bll = _sparsegrid_batch_ll(dm, info, θu_re, const_cache, ll_cache, level)
+            bll == -Inf && return -Inf
+            total += bll
+        end
+        return total
     else
         error("loglikelihood accessor not supported for this method.")
     end
