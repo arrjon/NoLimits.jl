@@ -71,7 +71,7 @@ TESTS=(
   estimation_saem_autodetect_tests.jl
   estimation_saem_suffstats_tests.jl
   estimation_multistart_tests.jl
-  estimation_sparsegrid_tests.jl
+  estimation_ghquadrature_tests.jl
   uq_tests.jl
   uq_edge_cases_tests.jl
   uq_plotting_tests.jl

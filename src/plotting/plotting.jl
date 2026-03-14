@@ -547,10 +547,6 @@ struct PlotCache{S, O, C, P, R, M}
     meta::M
 end
 
-@inline _is_hmm_dist(dist) =
-    dist isa ContinuousTimeDiscreteStatesHMM || dist isa MVContinuousTimeDiscreteStatesHMM ||
-    dist isa DiscreteTimeDiscreteStatesHMM   || dist isa MVDiscreteTimeDiscreteStatesHMM
-
 # Apply HMM forward-filter step for one observable column.
 # Updates hmm_priors[col] in-place and returns the distribution conditioned on past observations.
 function _apply_hmm_filter!(hmm_priors::Dict{Symbol, Any}, col::Symbol, dist, y_val)
@@ -1441,7 +1437,7 @@ function _default_random_effects(res::FitResult,
     isempty(re_names) && return fill(ComponentArray(NamedTuple()), length(dm.individuals))
 
     if res.result isa LaplaceResult || res.result isa LaplaceMAPResult || res.result isa FOCEIResult || res.result isa FOCEIMAPResult ||
-       res.result isa SparseGridResult || res.result isa SparseGridMAPResult
+       res.result isa GHQuadratureResult || res.result isa GHQuadratureMAPResult
         _, batch_infos, _ = _build_laplace_batch_infos(dm, constants_re)
         bstars = res.result.eb_modes
         length(bstars) == length(batch_infos) || error("Laplace-style EB modes do not match number of batches.")

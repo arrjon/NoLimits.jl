@@ -8,7 +8,7 @@ end
 function _resolve_wald_re_approx_method(source_method::FittingMethod;
                                         re_approx::Symbol,
                                         re_approx_method::Union{Nothing, FittingMethod})
-    if _is_re_laplace_family(source_method) || source_method isa SparseGrid || source_method isa SparseGridMAP
+    if _is_re_laplace_family(source_method) || source_method isa GHQuadrature || source_method isa GHQuadratureMAP
         re_approx == :auto ||
             error("re_approx is only used for MCEM/SAEM Wald UQ results.")
         re_approx_method === nothing ||
@@ -17,7 +17,7 @@ function _resolve_wald_re_approx_method(source_method::FittingMethod;
     end
 
     if !(source_method isa MCEM || source_method isa SAEM)
-        error("Wald UQ for random-effects models currently supports Laplace, LaplaceMAP, FOCEI, FOCEIMAP, MCEM, SAEM, SparseGrid, and SparseGridMAP.")
+        error("Wald UQ for random-effects models currently supports Laplace, LaplaceMAP, FOCEI, FOCEIMAP, MCEM, SAEM, GHQuadrature, and GHQuadratureMAP.")
     end
 
     if re_approx_method !== nothing
@@ -280,7 +280,7 @@ function _compute_uq_wald_re(res::FitResult;
     ebe_cache = _init_laplace_eval_cache(length(batch_infos), Float64)
     cache_opts = LaplaceCacheOptions(0.0)
     use_penalty = !isempty(keys(penalty_use))
-    use_prior = approx_method isa LaplaceMAP || approx_method isa FOCEIMAP || approx_method isa SparseGridMAP
+    use_prior = approx_method isa LaplaceMAP || approx_method isa FOCEIMAP || approx_method isa GHQuadratureMAP
     fallback_tracker = approx_method isa FOCEI || approx_method isa FOCEIMAP ? _FOCEIFallbackTracker() : nothing
     seed = rand(rng, UInt64)
 
@@ -300,11 +300,11 @@ function _compute_uq_wald_re(res::FitResult;
     function obj_active(x_active::AbstractVector)
         θu = _θu_from_active(x_active)
 
-        obj = if approx_method isa SparseGrid || approx_method isa SparseGridMAP
+        obj = if approx_method isa GHQuadrature || approx_method isa GHQuadratureMAP
             ll_cache_local = ll_cache isa AbstractVector ? ll_cache[1] : ll_cache
             total = 0.0
             for info in batch_infos
-                bll = _sparsegrid_batch_ll(dm, info,
+                bll = _ghq_batch_ll(dm, info,
                           _symmetrize_psd_params(θu, fe),
                           const_cache, ll_cache_local, approx_method.level)
                 bll == -Inf && return Inf
@@ -343,7 +343,7 @@ function _compute_uq_wald_re(res::FitResult;
 
     hess_backend_use = if hessian_backend != :auto
         hessian_backend
-    elseif approx_method isa SparseGrid || approx_method isa SparseGridMAP
+    elseif approx_method isa GHQuadrature || approx_method isa GHQuadratureMAP
         :forwarddiff
     else
         :fd_gradient
@@ -374,9 +374,9 @@ function _compute_uq_wald_re(res::FitResult;
             seed_i = seed + UInt64(bi)
             obj_b = function (x_active::AbstractVector)
                 θu = _θu_from_active(x_active)
-                obj_bi = if approx_method isa SparseGrid || approx_method isa SparseGridMAP
+                obj_bi = if approx_method isa GHQuadrature || approx_method isa GHQuadratureMAP
                     ll_cache_local = ll_cache isa AbstractVector ? ll_cache[1] : ll_cache
-                    bll = _sparsegrid_batch_ll(dm, info_single[1],
+                    bll = _ghq_batch_ll(dm, info_single[1],
                               _symmetrize_psd_params(θu, fe),
                               const_cache, ll_cache_local, approx_method.level)
                     bll == -Inf ? Inf : -bll

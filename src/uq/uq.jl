@@ -138,7 +138,7 @@ function compute_uq(res::FitResult;
                                           rng=rng)
         elseif src_method isa Laplace || src_method isa LaplaceMAP || src_method isa FOCEI || src_method isa FOCEIMAP ||
                src_method isa MCEM || src_method isa SAEM ||
-               src_method isa SparseGrid || src_method isa SparseGridMAP
+               src_method isa GHQuadrature || src_method isa GHQuadratureMAP
             return _compute_uq_wald_re(res;
                                        level=level_use,
                                        vcov=vcov,
@@ -158,7 +158,7 @@ function compute_uq(res::FitResult;
                                        serialization=serialization,
                                        rng=rng)
         else
-            error("Wald UQ is currently supported for MLE, MAP, Laplace, LaplaceMAP, FOCEI, FOCEIMAP, MCEM, SAEM, SparseGrid, and SparseGridMAP fit results.")
+            error("Wald UQ is currently supported for MLE, MAP, Laplace, LaplaceMAP, FOCEI, FOCEIMAP, MCEM, SAEM, GHQuadrature, and GHQuadratureMAP fit results.")
         end
     elseif backend == :profile
         return _compute_uq_profile(res;

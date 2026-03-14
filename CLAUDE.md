@@ -466,6 +466,9 @@ All plotting functions accept:
 - `kwargs_layout = NamedTuple()`
 - `save_path::Union{Nothing, String} = nothing`
 
+### HMM Forward Filtering in Plotting
+All plotting functions that evaluate observation distributions row-by-row (`plot_fits`, `plot_fits_comparison`, `plot_hidden_states`, `get_residuals`, and `build_plot_cache` with `cache_obs_dists=true`) apply proper HMM forward filtering: at each time step the distribution is conditioned on the filtered posterior from all previous observations via `_hmm_with_prior(dist, prior)`, and `hmm_priors` is updated with `posterior_hidden_states` after each observation (or `probabilities_hidden_states` for missing ones). This mirrors the behaviour in `_loglikelihood_individual`. The helper `_apply_hmm_filter!(hmm_priors, col, dist, y_val)` (defined in `plotting.jl`) encapsulates this step. Dense-grid paths (ODE models evaluated on a fine time grid) do not apply filtering since there are no real observations at the dense points.
+
 Key plotting functions:
 - `plot_data` - Raw observed data
 - `plot_fits` - Model predictions vs observations

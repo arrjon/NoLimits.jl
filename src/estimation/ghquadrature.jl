@@ -1,10 +1,10 @@
-# sparsegrid.jl
-# SparseGrid <: FittingMethod: Smolyak sparse-grid quadrature for NLME.
+# ghquadrature.jl
+# GHQuadrature <: FittingMethod: Smolyak sparse-grid quadrature for NLME.
 
-export SparseGrid
-export SparseGridResult
-export SparseGridMAP
-export SparseGridMAPResult
+export GHQuadrature
+export GHQuadratureResult
+export GHQuadratureMAP
+export GHQuadratureMAPResult
 
 using Optimization
 using OptimizationOptimJL
@@ -19,7 +19,7 @@ using LineSearches
 # ---------------------------------------------------------------------------
 
 """
-    SparseGrid(; level, optimizer, optim_kwargs, adtype,
+    GHQuadrature(; level, optimizer, optim_kwargs, adtype,
                  inner_options, inner_optimizer, inner_kwargs, inner_adtype,
                  inner_grad_tol, multistart_options, multistart_n, multistart_k,
                  multistart_grad_tol, multistart_max_rounds, multistart_sampling,
@@ -60,7 +60,7 @@ forward pass: the objective is fully differentiable by `AutoForwardDiff`.
 - `ignore_model_bounds::Bool = false`: if `true`, model-declared parameter
   bounds are ignored (user-supplied `lb`/`ub` still apply).
 """
-struct SparseGrid{LV, O, K, A, IO, MS, L, U} <: FittingMethod
+struct GHQuadrature{LV, O, K, A, IO, MS, L, U} <: FittingMethod
     level::LV   # Int (isotropic) or NamedTuple (anisotropic per-RE-group)
     optimizer::O
     optim_kwargs::K
@@ -72,7 +72,7 @@ struct SparseGrid{LV, O, K, A, IO, MS, L, U} <: FittingMethod
     ignore_model_bounds::Bool
 end
 
-SparseGrid(;
+GHQuadrature(;
     level = 3,  # Int or NamedTuple for anisotropic levels
     optimizer = OptimizationOptimJL.LBFGS(linesearch=LineSearches.BackTracking()),
     optim_kwargs = NamedTuple(),
@@ -99,7 +99,7 @@ SparseGrid(;
         LaplaceMultistartOptions(multistart_n, multistart_k, multistart_grad_tol,
                                  multistart_max_rounds, multistart_sampling) :
         multistart_options
-    SparseGrid(level, optimizer, optim_kwargs, adtype, inner, ms, lb, ub, ignore_model_bounds)
+    GHQuadrature(level, optimizer, optim_kwargs, adtype, inner, ms, lb, ub, ignore_model_bounds)
 end
 
 # ---------------------------------------------------------------------------
@@ -107,13 +107,13 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    SparseGridResult{S, O, I, R, N, B} <: MethodResult
+    GHQuadratureResult{S, O, I, R, N, B} <: MethodResult
 
-Method-specific result from a [`SparseGrid`](@ref) fit.  Stores the solution,
+Method-specific result from a [`GHQuadrature`](@ref) fit.  Stores the solution,
 objective value, iteration count, raw solver result, optional notes, and
 empirical-Bayes mode estimates for each batch (used by `get_random_effects`).
 """
-struct SparseGridResult{S, O, I, R, N, B} <: MethodResult
+struct GHQuadratureResult{S, O, I, R, N, B} <: MethodResult
     solution::S
     objective::O
     iterations::I
@@ -127,7 +127,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    _sparsegrid_batch_ll(dm, info, θu_re, const_cache, ll_cache, level) -> T
+    _ghq_batch_ll(dm, info, θu_re, const_cache, ll_cache, level) -> T
 
 Evaluate the batch marginal log-likelihood using the sparse grid at `level`.
 
@@ -139,7 +139,7 @@ Evaluate the batch marginal log-likelihood using the sparse grid at `level`.
 For batches with `n_b == 0` (all RE are constant), returns the sum of
 individual conditional log-likelihoods directly.
 """
-function _sparsegrid_batch_ll(dm::DataModel,
+function _ghq_batch_ll(dm::DataModel,
                                info::_LaplaceBatchInfo,
                                θu_re::ComponentArray,
                                const_cache::LaplaceConstantsCache,
@@ -175,11 +175,11 @@ function _sparsegrid_batch_ll(dm::DataModel,
         e isa DomainError && return T(-Inf)
         rethrow(e)
     end
-    return batch_loglik_sparsegrid(dm, info, θu_re, re_measure, sgrid, const_cache, ll_cache)
+    return batch_loglik_ghq(dm, info, θu_re, re_measure, sgrid, const_cache, ll_cache)
 end
 
 """
-    _build_anisotropic_batch_grid(dm, info, level::NamedTuple) -> SparseGridNodes
+    _build_anisotropic_batch_grid(dm, info, level::NamedTuple) -> GHQuadratureNodes
 
 Build (or retrieve from cache) the tensor-product anisotropic grid for this
 batch.  `level` is a NamedTuple mapping RE name → Int level.  RE groups not
@@ -210,7 +210,7 @@ end
 # ---------------------------------------------------------------------------
 
 # Pre-build all grids needed for this fit so concurrent use is thread-safe.
-function _prepopulate_sparsegrid_cache(dm::DataModel, batch_infos, level)
+function _prepopulate_ghq_cache(dm::DataModel, batch_infos, level)
     if level isa Int
         for d in unique(info.n_b for info in batch_infos)
             d > 0 && get_sparse_grid(d, level)
@@ -228,7 +228,7 @@ function _any_batch_too_large(dm::DataModel, batch_infos, level, threshold::Int)
     for info in batch_infos
         info.n_b == 0 && continue
         npts = if level isa Int
-            n_sparsegrid_points(info.n_b, level)
+            n_ghq_points(info.n_b, level)
         else
             size(_build_anisotropic_batch_grid(dm, info, level).nodes, 2)
         end
@@ -241,7 +241,7 @@ end
 # _fit_model dispatch
 # ---------------------------------------------------------------------------
 
-function _fit_model_scalar(dm::DataModel, method::SparseGrid, args...;
+function _fit_model_scalar(dm::DataModel, method::GHQuadrature, args...;
                     constants::NamedTuple        = NamedTuple(),
                     constants_re::NamedTuple     = NamedTuple(),
                     penalty::NamedTuple          = NamedTuple(),
@@ -264,19 +264,19 @@ function _fit_model_scalar(dm::DataModel, method::SparseGrid, args...;
 
     # ── Validate ────────────────────────────────────────────────────────────
     re_names = get_re_names(dm.model.random.random)
-    isempty(re_names) && error("SparseGrid requires random effects. Use MLE/MAP for fixed-effects-only models.")
+    isempty(re_names) && error("GHQuadrature requires random effects. Use MLE/MAP for fixed-effects-only models.")
 
-    _sparsegrid_validate_re_distributions(dm)
+    _ghq_validate_re_distributions(dm)
 
     fe = dm.model.fixed.fixed
     fixed_names = get_names(fe)
-    isempty(fixed_names) && error("SparseGrid requires at least one fixed effect.")
+    isempty(fixed_names) && error("GHQuadrature requires at least one fixed effect.")
     fixed_set = Set(fixed_names)
     for name in keys(constants)
         name in fixed_set || error("Unknown constant parameter $(name).")
     end
     all(name in keys(constants) for name in fixed_names) &&
-        error("SparseGrid requires at least one free fixed effect.")
+        error("GHQuadrature requires at least one free fixed effect.")
 
     free_names = [n for n in fixed_names if !(n in keys(constants))]
 
@@ -311,9 +311,9 @@ function _fit_model_scalar(dm::DataModel, method::SparseGrid, args...;
     end
 
     # Pre-populate sparse-grid cache for all unique free-RE dimensions.
-    _prepopulate_sparsegrid_cache(dm, batch_infos, method.level)
+    _prepopulate_ghq_cache(dm, batch_infos, method.level)
     if _any_batch_too_large(dm, batch_infos, method.level, 10_000)
-        @warn "SparseGrid: one or more batches have > 10,000 quadrature nodes. " *
+        @warn "GHQuadrature: one or more batches have > 10,000 quadrature nodes. " *
               "Consider reducing `level` or checking your RE batch structure."
     end
 
@@ -352,7 +352,7 @@ function _fit_model_scalar(dm::DataModel, method::SparseGrid, args...;
             bad = Threads.Atomic{Bool}(false)
             Threads.@threads for bi in eachindex(batch_infos)
                 tid = Threads.threadid()
-                bll = _sparsegrid_batch_ll(dm, batch_infos[bi], θu_re, const_cache,
+                bll = _ghq_batch_ll(dm, batch_infos[bi], θu_re, const_cache,
                                            ll_cache[tid], method.level)
                 if bll == -Inf
                     Threads.atomic_or!(bad, true)
@@ -366,7 +366,7 @@ function _fit_model_scalar(dm::DataModel, method::SparseGrid, args...;
         else
             s = zero(T)
             for info in batch_infos
-                bll = _sparsegrid_batch_ll(dm, info, θu_re, const_cache, ll_cache, method.level)
+                bll = _ghq_batch_ll(dm, info, θu_re, const_cache, ll_cache, method.level)
                 bll == -Inf && return infT
                 s += bll
             end
@@ -403,7 +403,7 @@ function _fit_model_scalar(dm::DataModel, method::SparseGrid, args...;
     if parentmodule(typeof(method.optimizer)) === OptimizationBBO && !use_bounds
         error("BlackBoxOptim methods require finite bounds. Add lower/upper bounds " *
               "in @fixedEffects (on transformed scale) or pass them via " *
-              "SparseGrid(lb=..., ub=...). A quick helper is " *
+              "GHQuadrature(lb=..., ub=...). A quick helper is " *
               "default_bounds_from_start(dm; margin=...).")
     end
     if parentmodule(typeof(method.optimizer)) === OptimizationBBO
@@ -451,30 +451,30 @@ function _fit_model_scalar(dm::DataModel, method::SparseGrid, args...;
     niter = hasproperty(sol, :stats) && hasproperty(sol.stats, :iterations) ?
             sol.stats.iterations : missing
     raw = hasproperty(sol, :original) ? sol.original : sol
-    result = SparseGridResult(sol, sol.objective, niter, raw, NamedTuple(),
+    result = GHQuadratureResult(sol, sol.objective, niter, raw, NamedTuple(),
                               ebe_cache.bstar_cache.b_star)
     return FitResult(method, result, summary, diagnostics,
                      store_data_model ? dm : nothing, args, fit_kwargs)
 end
 
 # ---------------------------------------------------------------------------
-# SparseGridMAP — MAP-regularised variant
+# GHQuadratureMAP — MAP-regularised variant
 # ---------------------------------------------------------------------------
 
 """
-    SparseGridMAP(; level, optimizer, optim_kwargs, adtype,
+    GHQuadratureMAP(; level, optimizer, optim_kwargs, adtype,
                     inner_options, inner_optimizer, inner_kwargs, inner_adtype,
                     inner_grad_tol, multistart_options, multistart_n, multistart_k,
                     multistart_grad_tol, multistart_max_rounds, multistart_sampling,
                     lb, ub, ignore_model_bounds) <: FittingMethod
 
-Like [`SparseGrid`](@ref) but adds the log-prior of the fixed effects to the
+Like [`GHQuadrature`](@ref) but adds the log-prior of the fixed effects to the
 outer objective, giving a MAP estimate rather than MLE.  Requires prior
 distributions on at least one free fixed effect.
 
-All keyword arguments are identical to [`SparseGrid`](@ref).
+All keyword arguments are identical to [`GHQuadrature`](@ref).
 """
-struct SparseGridMAP{LV, O, K, A, IO, MS, L, U} <: FittingMethod
+struct GHQuadratureMAP{LV, O, K, A, IO, MS, L, U} <: FittingMethod
     level::LV   # Int (isotropic) or NamedTuple (anisotropic per-RE-group)
     optimizer::O
     optim_kwargs::K
@@ -486,7 +486,7 @@ struct SparseGridMAP{LV, O, K, A, IO, MS, L, U} <: FittingMethod
     ignore_model_bounds::Bool
 end
 
-SparseGridMAP(;
+GHQuadratureMAP(;
     level = 3,  # Int or NamedTuple for anisotropic levels
     optimizer = OptimizationOptimJL.LBFGS(linesearch=LineSearches.BackTracking()),
     optim_kwargs = NamedTuple(),
@@ -513,15 +513,15 @@ SparseGridMAP(;
         LaplaceMultistartOptions(multistart_n, multistart_k, multistart_grad_tol,
                                  multistart_max_rounds, multistart_sampling) :
         multistart_options
-    SparseGridMAP(level, optimizer, optim_kwargs, adtype, inner, ms, lb, ub, ignore_model_bounds)
+    GHQuadratureMAP(level, optimizer, optim_kwargs, adtype, inner, ms, lb, ub, ignore_model_bounds)
 end
 
 """
-    SparseGridMAPResult{S, O, I, R, N, B} <: MethodResult
+    GHQuadratureMAPResult{S, O, I, R, N, B} <: MethodResult
 
-Method-specific result from a [`SparseGridMAP`](@ref) fit.
+Method-specific result from a [`GHQuadratureMAP`](@ref) fit.
 """
-struct SparseGridMAPResult{S, O, I, R, N, B} <: MethodResult
+struct GHQuadratureMAPResult{S, O, I, R, N, B} <: MethodResult
     solution::S
     objective::O
     iterations::I
@@ -535,20 +535,20 @@ end
 # ---------------------------------------------------------------------------
 # Both structs are now defined, so these methods can reference them safely.
 
-function _fit_model(dm::DataModel, method::SparseGrid, args...;
+function _fit_model(dm::DataModel, method::GHQuadrature, args...;
                     theta_0_untransformed::Union{Nothing, ComponentArray} = nothing,
                     kwargs...)
     level = method.level
     level isa Vector{Int} || return _fit_model_scalar(dm, method, args...;
                                        theta_0_untransformed=theta_0_untransformed,
                                        kwargs...)
-    isempty(level) && error("SparseGrid: `level` vector must not be empty.")
-    all(>(0), level) || error("SparseGrid: all entries in `level` must be positive integers.")
+    isempty(level) && error("GHQuadrature: `level` vector must not be empty.")
+    all(>(0), level) || error("GHQuadrature: all entries in `level` must be positive integers.")
 
     θ0 = theta_0_untransformed
     local res
     for lv in level
-        inner = SparseGrid(lv,
+        inner = GHQuadrature(lv,
                            method.optimizer, method.optim_kwargs, method.adtype,
                            method.inner, method.multistart, method.lb, method.ub,
                            method.ignore_model_bounds)
@@ -558,20 +558,20 @@ function _fit_model(dm::DataModel, method::SparseGrid, args...;
     return res
 end
 
-function _fit_model(dm::DataModel, method::SparseGridMAP, args...;
+function _fit_model(dm::DataModel, method::GHQuadratureMAP, args...;
                     theta_0_untransformed::Union{Nothing, ComponentArray} = nothing,
                     kwargs...)
     level = method.level
     level isa Vector{Int} || return _fit_model_scalar(dm, method, args...;
                                        theta_0_untransformed=theta_0_untransformed,
                                        kwargs...)
-    isempty(level) && error("SparseGridMAP: `level` vector must not be empty.")
-    all(>(0), level) || error("SparseGridMAP: all entries in `level` must be positive integers.")
+    isempty(level) && error("GHQuadratureMAP: `level` vector must not be empty.")
+    all(>(0), level) || error("GHQuadratureMAP: all entries in `level` must be positive integers.")
 
     θ0 = theta_0_untransformed
     local res
     for lv in level
-        inner = SparseGridMAP(lv,
+        inner = GHQuadratureMAP(lv,
                               method.optimizer, method.optim_kwargs, method.adtype,
                               method.inner, method.multistart, method.lb, method.ub,
                               method.ignore_model_bounds)
@@ -581,7 +581,7 @@ function _fit_model(dm::DataModel, method::SparseGridMAP, args...;
     return res
 end
 
-function _fit_model_scalar(dm::DataModel, method::SparseGridMAP, args...;
+function _fit_model_scalar(dm::DataModel, method::GHQuadratureMAP, args...;
                     constants::NamedTuple        = NamedTuple(),
                     constants_re::NamedTuple     = NamedTuple(),
                     penalty::NamedTuple          = NamedTuple(),
@@ -604,27 +604,27 @@ function _fit_model_scalar(dm::DataModel, method::SparseGridMAP, args...;
 
     # ── Validate ────────────────────────────────────────────────────────────
     re_names = get_re_names(dm.model.random.random)
-    isempty(re_names) && error("SparseGridMAP requires random effects. Use MAP for fixed-effects-only models.")
+    isempty(re_names) && error("GHQuadratureMAP requires random effects. Use MAP for fixed-effects-only models.")
 
-    _sparsegrid_validate_re_distributions(dm)
+    _ghq_validate_re_distributions(dm)
 
     fe = dm.model.fixed.fixed
     fixed_names = get_names(fe)
-    isempty(fixed_names) && error("SparseGridMAP requires at least one fixed effect.")
+    isempty(fixed_names) && error("GHQuadratureMAP requires at least one fixed effect.")
     fixed_set = Set(fixed_names)
     for name in keys(constants)
         name in fixed_set || error("Unknown constant parameter $(name).")
     end
     all(name in keys(constants) for name in fixed_names) &&
-        error("SparseGridMAP requires at least one free fixed effect.")
+        error("GHQuadratureMAP requires at least one free fixed effect.")
 
     free_names = [n for n in fixed_names if !(n in keys(constants))]
 
     # Validate priors for MAP
     priors = get_priors(fe)
     for name in free_names
-        hasproperty(priors, name) || error("SparseGridMAP requires priors on all free fixed effects. Missing prior for $(name).")
-        getfield(priors, name) isa Priorless && error("SparseGridMAP requires priors on all free fixed effects. Priorless for $(name).")
+        hasproperty(priors, name) || error("GHQuadratureMAP requires priors on all free fixed effects. Missing prior for $(name).")
+        getfield(priors, name) isa Priorless && error("GHQuadratureMAP requires priors on all free fixed effects. Priorless for $(name).")
     end
 
     # ── Starting point ───────────────────────────────────────────────────────
@@ -658,9 +658,9 @@ function _fit_model_scalar(dm::DataModel, method::SparseGridMAP, args...;
     end
 
     # Pre-populate sparse-grid cache for all unique free-RE dimensions.
-    _prepopulate_sparsegrid_cache(dm, batch_infos, method.level)
+    _prepopulate_ghq_cache(dm, batch_infos, method.level)
     if _any_batch_too_large(dm, batch_infos, method.level, 10_000)
-        @warn "SparseGridMAP: one or more batches have > 10,000 quadrature nodes. " *
+        @warn "GHQuadratureMAP: one or more batches have > 10,000 quadrature nodes. " *
               "Consider reducing `level` or checking your RE batch structure."
     end
 
@@ -698,7 +698,7 @@ function _fit_model_scalar(dm::DataModel, method::SparseGridMAP, args...;
             bad = Threads.Atomic{Bool}(false)
             Threads.@threads for bi in eachindex(batch_infos)
                 tid = Threads.threadid()
-                bll = _sparsegrid_batch_ll(dm, batch_infos[bi], θu_re, const_cache,
+                bll = _ghq_batch_ll(dm, batch_infos[bi], θu_re, const_cache,
                                            ll_cache[tid], method.level)
                 if bll == -Inf
                     Threads.atomic_or!(bad, true)
@@ -712,7 +712,7 @@ function _fit_model_scalar(dm::DataModel, method::SparseGridMAP, args...;
         else
             s = zero(T)
             for info in batch_infos
-                bll = _sparsegrid_batch_ll(dm, info, θu_re, const_cache, ll_cache, method.level)
+                bll = _ghq_batch_ll(dm, info, θu_re, const_cache, ll_cache, method.level)
                 bll == -Inf && return infT
                 s += bll
             end
@@ -751,7 +751,7 @@ function _fit_model_scalar(dm::DataModel, method::SparseGridMAP, args...;
     if parentmodule(typeof(method.optimizer)) === OptimizationBBO && !use_bounds
         error("BlackBoxOptim methods require finite bounds. Add lower/upper bounds " *
               "in @fixedEffects (on transformed scale) or pass them via " *
-              "SparseGridMAP(lb=..., ub=...). A quick helper is " *
+              "GHQuadratureMAP(lb=..., ub=...). A quick helper is " *
               "default_bounds_from_start(dm; margin=...).")
     end
     if parentmodule(typeof(method.optimizer)) === OptimizationBBO
@@ -799,7 +799,7 @@ function _fit_model_scalar(dm::DataModel, method::SparseGridMAP, args...;
     niter = hasproperty(sol, :stats) && hasproperty(sol.stats, :iterations) ?
             sol.stats.iterations : missing
     raw = hasproperty(sol, :original) ? sol.original : sol
-    result = SparseGridMAPResult(sol, sol.objective, niter, raw, NamedTuple(),
+    result = GHQuadratureMAPResult(sol, sol.objective, niter, raw, NamedTuple(),
                                  ebe_cache.bstar_cache.b_star)
     return FitResult(method, result, summary, diagnostics,
                      store_data_model ? dm : nothing, args, fit_kwargs)

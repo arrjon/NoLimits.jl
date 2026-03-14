@@ -58,7 +58,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    batch_loglik_sparsegrid(dm, batch_info, θ, re_measure, sgrid, const_cache, ll_cache)
+    batch_loglik_ghq(dm, batch_info, θ, re_measure, sgrid, const_cache, ll_cache)
     -> Float64 (or Dual)
 
 Estimate the batch marginal log-likelihood
@@ -87,12 +87,12 @@ Returns `-Inf` (promoting to the accumulator type) if:
 - The signed logsumexp result is negative (numerical instability warning)
 - The result is non-finite
 """
-function batch_loglik_sparsegrid(
+function batch_loglik_ghq(
     dm::DataModel,
     batch_info::_LaplaceBatchInfo,
     θ::ComponentArray,
     re_measure::AbstractREMeasure,
-    sgrid::SparseGridNodes{Float64},
+    sgrid::GHQuadratureNodes{Float64},
     const_cache::LaplaceConstantsCache,
     ll_cache::_LLCache,
 )
@@ -133,7 +133,7 @@ function batch_loglik_sparsegrid(
     log_val, result_sign = signed_logsumexp(a_vals, sgrid.signs)
 
     if result_sign < 0
-        @warn "SparseGrid: batch marginal likelihood estimate is negative " *
+        @warn "GHQuadrature: batch marginal likelihood estimate is negative " *
               "(signed logsumexp returned negative result). " *
               "This indicates numerical instability — consider reducing `level` " *
               "or checking your model specification."

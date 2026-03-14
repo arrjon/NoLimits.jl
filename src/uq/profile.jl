@@ -121,7 +121,7 @@ function _build_uq_obj_re(res::FitResult,
     ebe_cache = _init_laplace_eval_cache(length(batch_infos), Float64)
     cache_opts = LaplaceCacheOptions(0.0)
     use_penalty = !isempty(keys(penalty_use))
-    use_prior = method isa LaplaceMAP || method isa FOCEIMAP || method isa SparseGridMAP
+    use_prior = method isa LaplaceMAP || method isa FOCEIMAP || method isa GHQuadratureMAP
     fallback_tracker = method isa FOCEI || method isa FOCEIMAP ? _FOCEIFallbackTracker() : nothing
     seed = rand(rng, UInt64)
 
@@ -134,11 +134,11 @@ function _build_uq_obj_re(res::FitResult,
         end
         θu = _as_component_array(inv_transform(θt_full))
 
-        obj = if method isa SparseGrid || method isa SparseGridMAP
+        obj = if method isa GHQuadrature || method isa GHQuadratureMAP
             ll_cache_local = ll_cache isa AbstractVector ? ll_cache[1] : ll_cache
             total = 0.0
             for info in batch_infos
-                bll = _sparsegrid_batch_ll(dm, info,
+                bll = _ghq_batch_ll(dm, info,
                           _symmetrize_psd_params(θu, fe),
                           const_cache, ll_cache_local, method.level)
                 bll == -Inf && return Inf
@@ -212,8 +212,8 @@ function _compute_uq_profile(res::FitResult;
     dm === nothing && error("This fit result does not store a DataModel; pass store_data_model=true when fitting.")
     method = get_method(res)
     if !(method isa MLE || method isa MAP || method isa Laplace || method isa LaplaceMAP || method isa FOCEI || method isa FOCEIMAP ||
-         method isa SparseGrid || method isa SparseGridMAP)
-        error("Profile UQ is currently supported for MLE, MAP, Laplace, LaplaceMAP, FOCEI, FOCEIMAP, SparseGrid, and SparseGridMAP fit results.")
+         method isa GHQuadrature || method isa GHQuadratureMAP)
+        error("Profile UQ is currently supported for MLE, MAP, Laplace, LaplaceMAP, FOCEI, FOCEIMAP, GHQuadrature, and GHQuadratureMAP fit results.")
     end
 
     constants_use = constants === nothing ? _fit_kw(res, :constants, NamedTuple()) : constants
@@ -225,7 +225,7 @@ function _compute_uq_profile(res::FitResult;
 
     ctx = if method isa MLE || method isa MAP
         _build_uq_obj_no_re(res, constants_use, penalty_use, ode_args_use, ode_kwargs_use, serialization_use)
-    else  # Laplace, LaplaceMAP, FOCEI, FOCEIMAP, SparseGrid, SparseGridMAP
+    else  # Laplace, LaplaceMAP, FOCEI, FOCEIMAP, GHQuadrature, GHQuadratureMAP
         _build_uq_obj_re(res, constants_use, constants_re_use, penalty_use, ode_args_use, ode_kwargs_use, serialization_use, rng)
     end
 

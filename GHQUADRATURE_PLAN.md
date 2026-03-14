@@ -1,17 +1,17 @@
-# Plan: Sparse Deterministic Integration Backend for NLME (SparseGrid)
+# Plan: Sparse Deterministic Integration Backend for NLME (GHQuadrature)
 
 > **Progress legend:** ✅ Done | 🔲 Not started
 > **Steps completed:** 3 / 3
 
 ## Context
 
-NoLimits.jl currently offers Laplace, FOCEI, MCEM, and SAEM for marginal-likelihood-based RE estimation. All of these either use a point approximation (Laplace/FOCEI) or Monte Carlo sampling (MCEM/SAEM). A deterministic alternative is sparse-grid (Smolyak) quadrature, which yields exact integration in the limit as the grid level increases, is ForwardDiff-compatible by construction (nodes are fixed Float64 constants), and converges faster than MC for smooth integrands. This plan implements `SparseGrid` as a new `FittingMethod` plugging into the existing `fit_model` API.
+NoLimits.jl currently offers Laplace, FOCEI, MCEM, and SAEM for marginal-likelihood-based RE estimation. All of these either use a point approximation (Laplace/FOCEI) or Monte Carlo sampling (MCEM/SAEM). A deterministic alternative is sparse-grid (Smolyak) quadrature, which yields exact integration in the limit as the grid level increases, is ForwardDiff-compatible by construction (nodes are fixed Float64 constants), and converges faster than MC for smooth integrands. This plan implements `GHQuadrature` as a new `FittingMethod` plugging into the existing `fit_model` API.
 
 **User decisions from planning:**
 - Phase 1: Gauss-Hermite only
 - Always use sparse grid (no automatic fallback)
 - Signed logsumexp (Smolyak has negative weights)
-- New `SparseGrid <: FittingMethod`
+- New `GHQuadrature <: FittingMethod`
 
 ---
 
@@ -44,15 +44,15 @@ log L_batch ≈ signed_logsumexp_r [ log|W_r| + Σ_i ℓ_i(μ + Lz_r, θ) ]
 ```
 src/estimation/nodes.jl       # GH rule, Smolyak construction, global cache
 src/estimation/remeasure.jl   # AbstractREMeasure, GaussianRE, build_gaussian_re_from_batch
-src/estimation/kernel.jl      # signed_logsumexp, batch_loglik_sparsegrid
-src/estimation/sparsegrid.jl  # SparseGrid, SparseGridResult, _fit_model dispatch
+src/estimation/kernel.jl      # signed_logsumexp, batch_loglik_ghq
+src/estimation/ghquadrature.jl  # GHQuadrature, GHQuadratureResult, _fit_model dispatch
 ```
 
 ### Modified Files
 
 ```
 src/NoLimits.jl               # Add 4 include statements after laplace.jl
-src/estimation/common.jl      # Add SparseGridResult dispatch to get_random_effects, get_loglikelihood
+src/estimation/common.jl      # Add GHQuadratureResult dispatch to get_random_effects, get_loglikelihood
 ```
 
 No new package dependencies — uses `LinearAlgebra` (already present) for Golub-Welsch eigenvalue decomposition.
@@ -66,7 +66,7 @@ No new package dependencies — uses `LinearAlgebra` (already present) for Golub
 **Types:**
 
 ```julia
-struct SparseGridNodes{T<:AbstractFloat}
+struct GHQuadratureNodes{T<:AbstractFloat}
     dim::Int
     level::Int
     nodes::Matrix{T}        # (d, R): each column is one quadrature point
@@ -95,14 +95,14 @@ Multi-indices `α = (α₁,...,αd)` with each `αᵢ ≥ 1` and `Σαᵢ ≤ d 
 coefficient c(q) = (-1)^(d+L-1-q) * binomial(d-1, d+L-1-q)
 ```
 
-For each multi-index: tensor-product the 1D GH rules of orders `α₁,...,αd`. Each tensor-product point gets `logweight = Σ log|w_kᵢ| + log|c|`, sign = `sign(c) * Πsign(w_kᵢ)`. Collect all into `SparseGridNodes`. No deduplication in Phase 1.
+For each multi-index: tensor-product the 1D GH rules of orders `α₁,...,αd`. Each tensor-product point gets `logweight = Σ log|w_kᵢ| + log|c|`, sign = `sign(c) * Πsign(w_kᵢ)`. Collect all into `GHQuadratureNodes`. No deduplication in Phase 1.
 
 **Global cache** (populated before parallel use):
 
 ```julia
-const _SPARSEGRID_CACHE = Dict{Tuple{Int,Int}, SparseGridNodes{Float64}}()
-get_sparse_grid(dim::Int, level::Int) -> SparseGridNodes{Float64}  # builds and caches
-n_sparsegrid_points(dim::Int, level::Int) -> Int                   # exported utility
+const _SPARSEGRID_CACHE = Dict{Tuple{Int,Int}, GHQuadratureNodes{Float64}}()
+get_sparse_grid(dim::Int, level::Int) -> GHQuadratureNodes{Float64}  # builds and caches
+n_ghq_points(dim::Int, level::Int) -> Int                   # exported utility
 ```
 
 ---
@@ -156,18 +156,18 @@ function signed_logsumexp(logvals::AbstractVector{T}, signs::AbstractVector{Int8
 end
 ```
 
-**Batch kernel** `batch_loglik_sparsegrid(dm, batch_info, θ, re_measure, sgrid, const_cache, ll_cache)`:
+**Batch kernel** `batch_loglik_ghq(dm, batch_info, θ, re_measure, sgrid, const_cache, ll_cache)`:
 - For each node r: `b_r = transform(re, z_r)`, slice η per individual via `_build_eta_ind`, sum `_loglikelihood_individual`, accumulate `a[r] = logw[r] + cond + logcorrection`
 - Returns `signed_logsumexp(a, s)[1]` (negative result → `@warn` + return `-Inf`)
 - No prior logpdf term for `GaussianRE` (absorbed by change of variables)
 
 ---
 
-### 4. `sparsegrid.jl` — FittingMethod + Outer Loop
+### 4. `ghquadrature.jl` — FittingMethod + Outer Loop
 
 **Struct** (mirrors Laplace kwargs):
 ```julia
-struct SparseGrid{...} <: FittingMethod
+struct GHQuadrature{...} <: FittingMethod
     level::Int; optimizer; optim_kwargs; adtype
     inner::LaplaceInnerOptions; multistart::LaplaceMultistartOptions
     lb; ub; maxiters::Int; ignore_model_bounds::Bool
@@ -179,8 +179,8 @@ end
 2. `_build_laplace_batch_infos` (reuse)
 3. `build_ll_cache` (reuse)
 4. Pre-populate sparse grid cache for all unique `n_b`
-5. Objective: `θ → -Σ_batch batch_loglik_sparsegrid(...)` differentiated via `AutoForwardDiff`
-6. Optimize → `SparseGridResult` with `eb_modes` for `get_random_effects`
+5. Objective: `θ → -Σ_batch batch_loglik_ghq(...)` differentiated via `AutoForwardDiff`
+6. Optimize → `GHQuadratureResult` with `eb_modes` for `get_random_effects`
 
 Key difference from Laplace: **fully AD-differentiated** objective (no envelope theorem).
 
@@ -191,8 +191,8 @@ Key difference from Laplace: **fully AD-differentiated** objective (no envelope 
 | Risk | Severity | Mitigation |
 |------|----------|------------|
 | Signed logsumexp cancellation at high levels | High | Warn when 6+ digits lost. Safe range: level 1–3. |
-| Non-Gaussian RE (Beta, LogNormal, NPF) | High | Error before computation in `_sparsegrid_validate_re_distributions`. |
-| Dimension explosion (large batches) | Medium | `@warn` when `n_sparsegrid_points(n_b, level) > 10_000`. Export utility. |
+| Non-Gaussian RE (Beta, LogNormal, NPF) | High | Error before computation in `_ghq_validate_re_distributions`. |
+| Dimension explosion (large batches) | Medium | `@warn` when `n_ghq_points(n_b, level) > 10_000`. Export utility. |
 | ForwardDiff through `PDMat` Cholesky | High | Extract raw matrix via `d.Σ.mat`, call `cholesky(Symmetric(...))` directly. |
 | GH eigenvalue accuracy | Low | Test `sum(exp.(logweights)) ≈ 1.0` within 1e-12 for orders 1–5. |
 
@@ -215,19 +215,19 @@ Key difference from Laplace: **fully AD-differentiated** objective (no envelope 
 
 ## Phased Roadmap
 
-**Phase 1 (complete):** Smolyak + GH + GaussianRE + signed logsumexp + `SparseGrid` FittingMethod + `NormalizingPlanarFlow` RE via `CompositeRE`
+**Phase 1 (complete):** Smolyak + GH + GaussianRE + signed logsumexp + `GHQuadrature` FittingMethod + `NormalizingPlanarFlow` RE via `CompositeRE`
 
 **Phase 2 (complete):**
-- ✅ `SparseGridMAP` — MAP-regularised variant of `SparseGrid` (adds `logprior` to outer objective; same interface)
-- ✅ UQ support — Wald, Profile, and mcmc_refit UQ for `SparseGrid`/`SparseGridMAP` results; Wald default Hessian backend `:forwarddiff`; sandwich vcov per-batch supported
-- ✅ Plotting support — `SparseGrid`/`SparseGridMAP` results fully compatible with all plotting functions (`plot_fits`, `plot_residuals`, `plot_vpc`, `plot_random_effects_*`, `plot_uq_distributions`, etc.) via `_default_random_effects` dispatch
+- ✅ `GHQuadratureMAP` — MAP-regularised variant of `GHQuadrature` (adds `logprior` to outer objective; same interface)
+- ✅ UQ support — Wald, Profile, and mcmc_refit UQ for `GHQuadrature`/`GHQuadratureMAP` results; Wald default Hessian backend `:forwarddiff`; sandwich vcov per-batch supported
+- ✅ Plotting support — `GHQuadrature`/`GHQuadratureMAP` results fully compatible with all plotting functions (`plot_fits`, `plot_residuals`, `plot_vpc`, `plot_random_effects_*`, `plot_uq_distributions`, etc.) via `_default_random_effects` dispatch
 - ✅ Summary/accessor compatibility — all standard accessors (`get_params`, `get_objective`, `get_random_effects`, `get_loglikelihood`, `get_converged`, `get_iterations`, `get_raw`, `get_notes`) work for both result types
 
 **Phase 3 (complete):**
 - ✅ Parallelization — `EnsembleThreads` threads the batch loop; `Threads.@threads` with per-thread `ll_cache`; ForwardDiff-compatible via `Vector{T}` accumulation
 - ✅ Node deduplication — merge duplicate Smolyak nodes by summing signed weights; near-zero combined weights discarded; reduces d=2 L=3 from 15 to fewer points; integration accuracy preserved
 - ✅ `LogNormalRE` transport map — `η = exp(μ + σz)`, `logcorrection = 0`; handled via `CompositeRE` segment in `build_re_measure_from_batch`
-- ✅ `BoundedRE` transport map (Beta) — `η = logistic(z)`, `logcorrection = logpdf(Beta(α,β),η) + log η + log(1-η) + z²/2 + log(2π)/2`; `DomainError` on param underflow → graceful `-Inf` via try-catch in `_sparsegrid_batch_ll`
+- ✅ `BoundedRE` transport map (Beta) — `η = logistic(z)`, `logcorrection = logpdf(Beta(α,β),η) + log η + log(1-η) + z²/2 + log(2π)/2`; `DomainError` on param underflow → graceful `-Inf` via try-catch in `_ghq_batch_ll`
 - ✅ Anisotropic grids — `level::NamedTuple` maps RE group name → level; tensor product of per-group Smolyak grids; `get_anisotropic_grid(dims, levels)` with `_ANISOTROPIC_CACHE`; unlisted RE groups default to level 1
 - ✅ Additional 1D rules: `_gl_rule` (Gauss-Legendre on [-1,1]), `_cc_rule` (Clenshaw-Curtis on [-1,1]); `build_tensor_product_grid` for composing grids
 
@@ -242,7 +242,7 @@ Key difference from Laplace: **fully AD-differentiated** objective (no envelope 
 
 ## Incremental Implementation & Testing
 
-Tests added to `test/estimation_sparsegrid_tests.jl` after each step. User approves before next step.
+Tests added to `test/estimation_ghq_tests.jl` after each step. User approves before next step.
 
 ---
 
@@ -256,7 +256,7 @@ Tests:
 - `build_sparse_grid(1, 2)` matches `gh_rule(2)` nodes/weights
 - `build_sparse_grid(2, 2)` correct point count
 - Integration: `Σ exp(logw_r)*f(node_r)` for `f=1`, `f=z²`, `f=exp(Σz)` vs analytic
-- `n_sparsegrid_points(d, L) == size(build_sparse_grid(d,L).nodes, 2)`
+- `n_ghq_points(d, L) == size(build_sparse_grid(d,L).nodes, 2)`
 
 ---
 
@@ -271,14 +271,14 @@ Tests:
 - `GaussianRE` from `MvNormal(zeros(2), Σ)`: L matches `cholesky(Σ).L`
 - `logcorrection(::GaussianRE, z) == 0`
 - Non-Gaussian → error mentioning "Phase 1"
-- `batch_loglik_sparsegrid` trivial model: finite, matches expected integral
+- `batch_loglik_ghq` trivial model: finite, matches expected integral
 
 ---
 
-### ✅ Step 3: `sparsegrid.jl` — Full `SparseGrid` FittingMethod
+### ✅ Step 3: `ghquadrature.jl` — Full `GHQuadrature` FittingMethod
 
 Tests:
-- `fit_model(dm, SparseGrid(level=1))` on simple `y ~ Normal(a + η, σ)` model, 10 individuals
+- `fit_model(dm, GHQuadrature(level=1))` on simple `y ~ Normal(a + η, σ)` model, 10 individuals
 - All accessors: `get_params`, `get_objective`, `get_converged`, `get_iterations`, `get_random_effects`
 - Level comparison: LL(level=2) ≥ LL(level=1) (better approximation)
 - Parameter agreement with Laplace within 20%

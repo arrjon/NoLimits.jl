@@ -9,7 +9,7 @@ using LinearAlgebra
 # ---------------------------------------------------------------------------
 
 """
-    SparseGridNodes{T}
+    GHQuadratureNodes{T}
 
 Precomputed Smolyak sparse-grid quadrature rule in `dim` dimensions at
 accuracy `level`.
@@ -22,7 +22,7 @@ Fields:
 Usage: approximate ∫ f(z) N(z; 0, I) dz ≈ signed_sum_r w_r f(z_r)
 where w_r = signs[r] * exp(logweights[r]).
 """
-struct SparseGridNodes{T<:AbstractFloat}
+struct GHQuadratureNodes{T<:AbstractFloat}
     dim::Int
     level::Int
     nodes::Matrix{T}
@@ -105,7 +105,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    build_sparse_grid(dim::Int, level::Int) -> SparseGridNodes{Float64}
+    build_sparse_grid(dim::Int, level::Int) -> GHQuadratureNodes{Float64}
 
 Build the Smolyak sparse-grid quadrature rule in `dim` dimensions at accuracy
 `level` using Gauss-Hermite 1D rules (probabilist's convention).
@@ -215,17 +215,17 @@ function build_sparse_grid(dim::Int, level::Int)
         out_mat[:, r] = dedup_nodes[r]
     end
 
-    return SparseGridNodes{Float64}(dim, level, out_mat, dedup_lw, dedup_signs)
+    return GHQuadratureNodes{Float64}(dim, level, out_mat, dedup_lw, dedup_signs)
 end
 
 # ---------------------------------------------------------------------------
 # Global cache
 # ---------------------------------------------------------------------------
 
-const _SPARSEGRID_CACHE = Dict{Tuple{Int,Int}, SparseGridNodes{Float64}}()
+const _SPARSEGRID_CACHE = Dict{Tuple{Int,Int}, GHQuadratureNodes{Float64}}()
 
 """
-    get_sparse_grid(dim::Int, level::Int) -> SparseGridNodes{Float64}
+    get_sparse_grid(dim::Int, level::Int) -> GHQuadratureNodes{Float64}
 
 Return the Smolyak sparse-grid for the given `dim` and `level`, building and
 caching it on first call. Thread-safe only when all needed `(dim, level)` pairs
@@ -240,15 +240,15 @@ function get_sparse_grid(dim::Int, level::Int)
 end
 
 """
-    n_sparsegrid_points(dim::Int, level::Int) -> Int
+    n_ghq_points(dim::Int, level::Int) -> Int
 
 Return the number of quadrature points (after deduplication) in the Smolyak
 sparse grid for `dim` dimensions at accuracy `level`.
 
 Useful for checking grid size before fitting:
-    n_sparsegrid_points(5, 3)  # after deduplication
+    n_ghq_points(5, 3)  # after deduplication
 """
-function n_sparsegrid_points(dim::Int, level::Int)
+function n_ghq_points(dim::Int, level::Int)
     return size(get_sparse_grid(dim, level).nodes, 2)
 end
 
@@ -332,7 +332,7 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    build_tensor_product_grid(grids) -> SparseGridNodes{Float64}
+    build_tensor_product_grid(grids) -> GHQuadratureNodes{Float64}
 
 Build the tensor product of two or more sparse-grid rules.  The resulting rule
 integrates the same class of functions as the individual rules in independent
@@ -341,13 +341,13 @@ subspaces:
     ∫ f(z) N(z₁; 0, I_{d₁}) N(z₂; 0, I_{d₂}) dz₁ dz₂
     ≈ Σ_{r₁,r₂} (w₁_r₁ · w₂_r₂) f([z₁_r₁; z₂_r₂])
 
-The resulting `SparseGridNodes.level` is set to `0` (sentinel: product grid,
+The resulting `GHQuadratureNodes.level` is set to `0` (sentinel: product grid,
 no single accuracy level).  The `dim` field is the sum of all input dimensions.
 
 Use this to build anisotropic grids with different accuracy levels per
 RE group: `build_tensor_product_grid([get_sparse_grid(d₁,l₁), get_sparse_grid(d₂,l₂)])`.
 """
-function build_tensor_product_grid(grids::AbstractVector{<:SparseGridNodes{T}}) where {T}
+function build_tensor_product_grid(grids::AbstractVector{<:GHQuadratureNodes{T}}) where {T}
     isempty(grids) && error("build_tensor_product_grid: at least one grid required")
     length(grids) == 1 && return grids[1]
     result = grids[1]
@@ -357,7 +357,7 @@ function build_tensor_product_grid(grids::AbstractVector{<:SparseGridNodes{T}}) 
     return result
 end
 
-function _tensor_product_two(sg1::SparseGridNodes{T}, sg2::SparseGridNodes{T}) where {T}
+function _tensor_product_two(sg1::GHQuadratureNodes{T}, sg2::GHQuadratureNodes{T}) where {T}
     R1 = size(sg1.nodes, 2)
     R2 = size(sg2.nodes, 2)
     R  = R1 * R2
@@ -379,7 +379,7 @@ function _tensor_product_two(sg1::SparseGridNodes{T}, sg2::SparseGridNodes{T}) w
     end
 
     # level=0 is the sentinel for "product grid" (no single Smolyak level)
-    return SparseGridNodes{T}(d, 0, nodes_out, logweights_out, signs_out)
+    return GHQuadratureNodes{T}(d, 0, nodes_out, logweights_out, signs_out)
 end
 
 # ---------------------------------------------------------------------------
@@ -387,10 +387,10 @@ end
 # ---------------------------------------------------------------------------
 
 # Key: (dims, levels) — dims[k] = RE-group dimension, levels[k] = GH level for that group
-const _ANISOTROPIC_CACHE = Dict{Tuple{Vector{Int}, Vector{Int}}, SparseGridNodes{Float64}}()
+const _ANISOTROPIC_CACHE = Dict{Tuple{Vector{Int}, Vector{Int}}, GHQuadratureNodes{Float64}}()
 
 """
-    get_anisotropic_grid(dims::Vector{Int}, levels::Vector{Int}) -> SparseGridNodes{Float64}
+    get_anisotropic_grid(dims::Vector{Int}, levels::Vector{Int}) -> GHQuadratureNodes{Float64}
 
 Return (building and caching on first call) the tensor-product sparse grid
 for a batch with multiple RE groups, each with its own dimension and accuracy
@@ -417,7 +417,7 @@ end
     n_anisotropic_grid_points(dims::Vector{Int}, levels::Vector{Int}) -> Int
 
 Return the total number of quadrature points in the tensor-product anisotropic
-grid: equal to `prod(n_sparsegrid_points(dims[k], levels[k]) for k)`.
+grid: equal to `prod(n_ghq_points(dims[k], levels[k]) for k)`.
 
 Useful for checking grid sizes before fitting with anisotropic levels.
 """

@@ -144,11 +144,11 @@ function build_gaussian_re_from_batch(
                 end
             else
                 error(
-                    "SparseGrid Phase 1 supports only Normal and MvNormal " *
+                    "GHQuadrature Phase 1 supports only Normal and MvNormal " *
                     "random effects. Found distribution of type " *
                     "$(typeof(dist)) for RE '$(re)'. " *
                     "Use Laplace for non-Gaussian RE distributions, or " *
-                    "wait for SparseGrid Phase 2 which will add transport " *
+                    "wait for GHQuadrature Phase 2 which will add transport " *
                     "maps for arbitrary distributions."
                 )
             end
@@ -495,7 +495,7 @@ function build_re_measure_from_batch(
                     error(
                         "build_re_measure_from_batch: unsupported support for distribution " *
                         "$(typeof(dist)) (lo=$lo, hi=$hi). " *
-                        "SparseGrid supports ℝ, (0,∞), and finite (a,b) supports."
+                        "GHQuadrature supports ℝ, (0,∞), and finite (a,b) supports."
                     )
                 end
                 push!(μ_segs, nothing); push!(L_diags, nothing)
@@ -548,19 +548,19 @@ end
 # ---------------------------------------------------------------------------
 
 """
-    _sparsegrid_validate_re_distributions(dm::DataModel)
+    _ghq_validate_re_distributions(dm::DataModel)
 
 Throw an informative error if the model contains random effects whose
-distribution type cannot be handled by SparseGrid.
+distribution type cannot be handled by GHQuadrature.
 
-SparseGrid supports all `ContinuousUnivariateDistribution` types (via explicit
+GHQuadrature supports all `ContinuousUnivariateDistribution` types (via explicit
 or generic transport maps) plus `MvNormal` and `NormalizingPlanarFlow`.
 Discrete distributions and unsupported multivariate types are rejected here.
 
-Called once at the start of `_fit_model(::SparseGrid, ...)` before any
+Called once at the start of `_fit_model(::GHQuadrature, ...)` before any
 expensive computation.
 """
-function _sparsegrid_validate_re_distributions(dm::DataModel)
+function _ghq_validate_re_distributions(dm::DataModel)
     re   = dm.model.random.random
     re_t = get_re_types(re)
     isempty(re_t) && return
@@ -583,10 +583,10 @@ function _sparsegrid_validate_re_distributions(dm::DataModel)
         names_str = join(string.(bad), ", ")
         types_str = join([string(get_re_types(re)[n]) for n in bad], ", ")
         error(
-            "SparseGrid does not support discrete or unsupported multivariate " *
+            "GHQuadrature does not support discrete or unsupported multivariate " *
             "RE distributions.\n" *
             "Unsupported RE(s): $(names_str) (type(s): $(types_str)).\n" *
-            "SparseGrid supports all continuous univariate distributions, " *
+            "GHQuadrature supports all continuous univariate distributions, " *
             "MvNormal, and NormalizingPlanarFlow."
         )
     end

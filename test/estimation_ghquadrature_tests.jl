@@ -16,7 +16,7 @@ const _gh_rule           = NoLimits._gh_rule
 const build_sparse_grid  = NoLimits.build_sparse_grid
 
 # Helper: signed quadrature sum for integration tests
-function sg_integrate(f, sg::NoLimits.SparseGridNodes)
+function sg_integrate(f, sg::NoLimits.GHQuadratureNodes)
     total = 0.0
     for r in 1:size(sg.nodes, 2)
         z = sg.nodes[:, r]
@@ -29,7 +29,7 @@ end
 # STEP 1: nodes.jl — GH rule + Smolyak construction + cache
 # ============================================================
 
-@testset "SparseGrid nodes.jl" begin
+@testset "GHQuadrature nodes.jl" begin
 
     # ----------------------------------------------------------
     # 1D Gauss-Hermite rule (probabilist's convention)
@@ -179,12 +179,12 @@ end
     end
 
     # ----------------------------------------------------------
-    # n_sparsegrid_points utility
+    # n_ghq_points utility
     # ----------------------------------------------------------
-    @testset "n_sparsegrid_points matches actual grid size" begin
+    @testset "n_ghq_points matches actual grid size" begin
         for d in 1:4, L in 1:3
             sg = build_sparse_grid(d, L)
-            @test NoLimits.n_sparsegrid_points(d, L) == size(sg.nodes, 2)
+            @test NoLimits.n_ghq_points(d, L) == size(sg.nodes, 2)
         end
     end
 
@@ -207,13 +207,13 @@ end
         end
     end
 
-end  # @testset "SparseGrid nodes.jl"
+end  # @testset "GHQuadrature nodes.jl"
 
 # ============================================================
 # STEP 2: remeasure.jl + kernel.jl
 # ============================================================
 
-@testset "SparseGrid remeasure.jl + kernel.jl" begin
+@testset "GHQuadrature remeasure.jl + kernel.jl" begin
 
     # ----------------------------------------------------------
     # signed_logsumexp
@@ -367,7 +367,7 @@ end  # @testset "SparseGrid nodes.jl"
     end
 
     # ----------------------------------------------------------
-    # batch_loglik_sparsegrid: analytical test
+    # batch_loglik_ghq: analytical test
     #
     # Model: y ~ Normal(η, σ), η ~ Normal(0, σ_η), single obs y=y0
     # Analytic marginal log-likelihood:
@@ -377,7 +377,7 @@ end  # @testset "SparseGrid nodes.jl"
     # should be accurate to within a few percent even at level=2.
     # ----------------------------------------------------------
 
-    @testset "batch_loglik_sparsegrid: Gaussian-Gaussian analytic check" begin
+    @testset "batch_loglik_ghq: Gaussian-Gaussian analytic check" begin
         # σ=1, σ_η=1, y=0: analytic = logpdf(Normal(0, sqrt(2)), 0)
         σ_val  = 1.0
         σ_η_val = 1.0
@@ -411,7 +411,7 @@ end  # @testset "SparseGrid nodes.jl"
             info = batch_infos[1]
             re_m = NoLimits.build_gaussian_re_from_batch(info, θ, const_cache, dm, ll_cache)
             sgrid = NoLimits.build_sparse_grid(info.n_b, level)
-            lv = NoLimits.batch_loglik_sparsegrid(dm, info, θ, re_m, sgrid, const_cache, ll_cache)
+            lv = NoLimits.batch_loglik_ghq(dm, info, θ, re_m, sgrid, const_cache, ll_cache)
             push!(results, lv)
             @test isfinite(lv)   # must be finite at all levels
         end
@@ -429,7 +429,7 @@ end  # @testset "SparseGrid nodes.jl"
         @test errs[4] < errs[2]
     end
 
-    @testset "batch_loglik_sparsegrid: returns finite value for simple model" begin
+    @testset "batch_loglik_ghq: returns finite value for simple model" begin
         model, dm = _make_simple_dm(1.0)
         θ = get_θ0_untransformed(model.fixed.fixed)
         _, batch_infos, const_cache = NoLimits._build_laplace_batch_infos(dm, NamedTuple())
@@ -440,29 +440,29 @@ end  # @testset "SparseGrid nodes.jl"
             info.n_b == 0 && continue
             re_m  = NoLimits.build_gaussian_re_from_batch(info, θ, const_cache, dm, ll_cache)
             sgrid = NoLimits.build_sparse_grid(info.n_b, 2)
-            lv = NoLimits.batch_loglik_sparsegrid(dm, info, θ, re_m, sgrid, const_cache, ll_cache)
+            lv = NoLimits.batch_loglik_ghq(dm, info, θ, re_m, sgrid, const_cache, ll_cache)
             @test isfinite(lv)
             @test lv < 0.0   # log-likelihood should be negative
         end
     end
 
-    @testset "_sparsegrid_validate_re_distributions: Normal passes" begin
+    @testset "_ghq_validate_re_distributions: Normal passes" begin
         _, dm = _make_simple_dm()
         # Should not throw
-        @test (NoLimits._sparsegrid_validate_re_distributions(dm); true)
+        @test (NoLimits._ghq_validate_re_distributions(dm); true)
     end
 
-end  # @testset "SparseGrid remeasure.jl + kernel.jl"
+end  # @testset "GHQuadrature remeasure.jl + kernel.jl"
 
 # =============================================================================
-# Step 3: sparsegrid.jl — Full SparseGrid FittingMethod
+# Step 3: ghquadrature.jl — Full GHQuadrature FittingMethod
 # =============================================================================
 
 # ---------------------------------------------------------------------------
 # Shared test model: y ~ Normal(a + η, σ), η ~ N(0, ω), 10 individuals, 5 obs
 # ---------------------------------------------------------------------------
 
-function _make_simple_sparsegrid_dm(; n_id=10, n_obs=5, rng=MersenneTwister(42))
+function _make_simple_ghq_dm(; n_id=10, n_obs=5, rng=MersenneTwister(42))
     model = @Model begin
         @fixedEffects begin
             a = RealNumber(1.0)
@@ -487,16 +487,16 @@ function _make_simple_sparsegrid_dm(; n_id=10, n_obs=5, rng=MersenneTwister(42))
     return DataModel(model, df; primary_id=:ID, time_col=:t)
 end
 
-@testset "SparseGrid sparsegrid.jl" begin
+@testset "GHQuadrature ghquadrature.jl" begin
 
-    dm = _make_simple_sparsegrid_dm()
+    dm = _make_simple_ghq_dm()
 
     # ── Basic fit at level=1 ─────────────────────────────────────────────────
     @testset "Basic fit level=1 LBFGS" begin
-        res = fit_model(dm, SparseGrid(level=1; optim_kwargs=(maxiters=200,)))
+        res = fit_model(dm, GHQuadrature(level=1; optim_kwargs=(maxiters=200,)))
 
         @test res isa NoLimits.FitResult
-        @test res.result isa NoLimits.SparseGridResult
+        @test res.result isa NoLimits.GHQuadratureResult
 
         # Accessors all return sensible values
         obj = get_objective(res)
@@ -522,7 +522,7 @@ end
 
     # ── Convenience accessor without passing dm ───────────────────────────────
     @testset "Stored DataModel accessor" begin
-        res = fit_model(dm, SparseGrid(level=1; optim_kwargs=(maxiters=100,)))
+        res = fit_model(dm, GHQuadrature(level=1; optim_kwargs=(maxiters=100,)))
         re  = get_random_effects(res)
         @test nrow(re.η) == 10
         ll = get_loglikelihood(res)
@@ -532,7 +532,7 @@ end
 
     # ── get_loglikelihood re-evaluates sparse grid ────────────────────────────
     @testset "get_loglikelihood matches -objective" begin
-        res = fit_model(dm, SparseGrid(level=1; optim_kwargs=(maxiters=200,)))
+        res = fit_model(dm, GHQuadrature(level=1; optim_kwargs=(maxiters=200,)))
         ll  = get_loglikelihood(dm, res)
         @test isfinite(ll)
         # objective = -LL (no penalty), so ll ≈ -objective
@@ -541,8 +541,8 @@ end
 
     # ── Level comparison: higher level → lower (or equal) -LL ────────────────
     @testset "Level 1 vs 2 objective" begin
-        res1 = fit_model(dm, SparseGrid(level=1; optim_kwargs=(maxiters=300,)))
-        res2 = fit_model(dm, SparseGrid(level=2; optim_kwargs=(maxiters=300,)))
+        res1 = fit_model(dm, GHQuadrature(level=1; optim_kwargs=(maxiters=300,)))
+        res2 = fit_model(dm, GHQuadrature(level=2; optim_kwargs=(maxiters=300,)))
         # Level 2 should get at least as good or better objective in most cases;
         # we check that both converge and give finite objectives.
         @test isfinite(get_objective(res1))
@@ -554,7 +554,7 @@ end
 
     # ── Parameter agreement with Laplace ─────────────────────────────────────
     @testset "Parameter agreement with Laplace" begin
-        res_sg  = fit_model(dm, SparseGrid(level=2; optim_kwargs=(maxiters=300,)))
+        res_sg  = fit_model(dm, GHQuadrature(level=2; optim_kwargs=(maxiters=300,)))
         res_lap = fit_model(dm, NoLimits.Laplace(; optim_kwargs=(maxiters=300,)))
 
         p_sg  = NoLimits.get_params(res_sg;  scale=:untransformed)
@@ -613,7 +613,7 @@ end
             θu_re = NoLimits._symmetrize_psd_params(θu, fe)
             total = 0.0
             for info in batch_infos
-                bll = NoLimits._sparsegrid_batch_ll(dm_small, info, θu_re, const_cache, ll_cache, level)
+                bll = NoLimits._ghq_batch_ll(dm_small, info, θu_re, const_cache, ll_cache, level)
                 bll == -Inf && return Inf
                 total += bll
             end
@@ -637,7 +637,7 @@ end
 
     # ── Alternative outer optimizers ─────────────────────────────────────────
     @testset "BFGS outer optimizer" begin
-        res = fit_model(dm, SparseGrid(level=1;
+        res = fit_model(dm, GHQuadrature(level=1;
                             optimizer=OptimizationOptimJL.BFGS(),
                             optim_kwargs=(maxiters=200,)))
         @test isfinite(get_objective(res))
@@ -645,7 +645,7 @@ end
     end
 
     @testset "NelderMead outer optimizer" begin
-        res = fit_model(dm, SparseGrid(level=1;
+        res = fit_model(dm, GHQuadrature(level=1;
                             optimizer=OptimizationOptimJL.NelderMead(),
                             optim_kwargs=(maxiters=500,)))
         @test isfinite(get_objective(res))
@@ -654,7 +654,7 @@ end
 
     @testset "BlackBoxOptim outer optimizer" begin
         lb_val, ub_val = NoLimits.default_bounds_from_start(dm; margin=3.0)
-        res = fit_model(dm, SparseGrid(level=1;
+        res = fit_model(dm, GHQuadrature(level=1;
                             optimizer=BBO_adaptive_de_rand_1_bin_radiuslimited(),
                             optim_kwargs=(maxiters=500,),
                             lb=lb_val, ub=ub_val))
@@ -664,7 +664,7 @@ end
 
     # ── constants kwarg ───────────────────────────────────────────────────────
     @testset "constants fix a parameter" begin
-        res = fit_model(dm, SparseGrid(level=1; optim_kwargs=(maxiters=200,));
+        res = fit_model(dm, GHQuadrature(level=1; optim_kwargs=(maxiters=200,));
                         constants=(a=1.0,))
         params = NoLimits.get_params(res; scale=:untransformed)
         @test params.a ≈ 1.0
@@ -673,21 +673,21 @@ end
 
     # ── store_data_model=false ────────────────────────────────────────────────
     @testset "store_data_model=false" begin
-        res = fit_model(dm, SparseGrid(level=1; optim_kwargs=(maxiters=100,));
+        res = fit_model(dm, GHQuadrature(level=1; optim_kwargs=(maxiters=100,));
                         store_data_model=false)
         @test get_data_model(res) === nothing
     end
 
-end  # @testset "SparseGrid sparsegrid.jl"
+end  # @testset "GHQuadrature ghquadrature.jl"
 
 # =============================================================================
 # NPF (NormalizingPlanarFlow) RE support
 # =============================================================================
 
-@testset "SparseGrid NPF RE support" begin
+@testset "GHQuadrature NPF RE support" begin
 
     # ── Validation no longer rejects NPF ─────────────────────────────────────
-    @testset "_sparsegrid_validate_re_distributions allows NPF" begin
+    @testset "_ghq_validate_re_distributions allows NPF" begin
         model_npf = @Model begin
             @helpers begin
                 sat(u) = u / (1 + abs(u))
@@ -712,7 +712,7 @@ end  # @testset "SparseGrid sparsegrid.jl"
                          y=randn(MersenneTwister(7), 15))
         dm_npf = DataModel(model_npf, df_v; primary_id=:ID, time_col=:t)
         # Should NOT throw
-        @test_nowarn NoLimits._sparsegrid_validate_re_distributions(dm_npf)
+        @test_nowarn NoLimits._ghq_validate_re_distributions(dm_npf)
     end
 
     # ── CompositeRE is returned for NPF batches ───────────────────────────────
@@ -769,7 +769,7 @@ end  # @testset "SparseGrid sparsegrid.jl"
 
     # ── GaussianRE fast path still returned for pure-Gaussian model ───────────
     @testset "build_re_measure_from_batch returns GaussianRE for Normal model" begin
-        dm_gauss = _make_simple_sparsegrid_dm(; n_id=4, n_obs=3)
+        dm_gauss = _make_simple_ghq_dm(; n_id=4, n_obs=3)
         fe = dm_gauss.model.fixed.fixed
         θ0_u = NoLimits.get_θ0_untransformed(fe)
         θ_re = NoLimits._symmetrize_psd_params(θ0_u, fe)
@@ -783,7 +783,7 @@ end  # @testset "SparseGrid sparsegrid.jl"
     end
 
     # ── End-to-end fit with NPF RE ────────────────────────────────────────────
-    @testset "fit_model SparseGrid level=1 with NPF RE" begin
+    @testset "fit_model GHQuadrature level=1 with NPF RE" begin
         model_npf = @Model begin
             @helpers begin
                 sat(u) = u / (1 + abs(u))
@@ -810,10 +810,10 @@ end  # @testset "SparseGrid sparsegrid.jl"
         df_npf = DataFrame(ID=ids, t=ts, y=ys)
         dm_npf = DataModel(model_npf, df_npf; primary_id=:ID, time_col=:t)
 
-        res = fit_model(dm_npf, SparseGrid(level=1; optim_kwargs=(maxiters=200,)))
+        res = fit_model(dm_npf, GHQuadrature(level=1; optim_kwargs=(maxiters=200,)))
 
         @test res isa NoLimits.FitResult
-        @test res.result isa NoLimits.SparseGridResult
+        @test res.result isa NoLimits.GHQuadratureResult
         @test isfinite(get_objective(res))
         @test get_objective(res) > 0
 
@@ -827,17 +827,17 @@ end  # @testset "SparseGrid sparsegrid.jl"
         @test nrow(re.η) == 8
     end
 
-end  # @testset "SparseGrid NPF RE support"
+end  # @testset "GHQuadrature NPF RE support"
 
 # =============================================================================
-# Phase 2: SparseGridMAP + Wald UQ
+# Phase 2: GHQuadratureMAP + Wald UQ
 # =============================================================================
 
 # ---------------------------------------------------------------------------
 # Model with priors for MAP
 # ---------------------------------------------------------------------------
 
-function _make_map_sparsegrid_dm(; n_id=8, n_obs=4, rng=MersenneTwister(7))
+function _make_map_ghq_dm(; n_id=8, n_obs=4, rng=MersenneTwister(7))
     model = @Model begin
         @fixedEffects begin
             a = RealNumber(1.0; prior=Normal(0.0, 2.0))
@@ -862,16 +862,16 @@ function _make_map_sparsegrid_dm(; n_id=8, n_obs=4, rng=MersenneTwister(7))
     return DataModel(model, df; primary_id=:ID, time_col=:t)
 end
 
-@testset "SparseGridMAP" begin
+@testset "GHQuadratureMAP" begin
 
-    dm_map = _make_map_sparsegrid_dm()
+    dm_map = _make_map_ghq_dm()
 
     # ── Basic fit ────────────────────────────────────────────────────────────
     @testset "Basic fit" begin
-        res = fit_model(dm_map, SparseGridMAP(level=1; optim_kwargs=(maxiters=200,)))
+        res = fit_model(dm_map, GHQuadratureMAP(level=1; optim_kwargs=(maxiters=200,)))
 
         @test res isa NoLimits.FitResult
-        @test res.result isa NoLimits.SparseGridMAPResult
+        @test res.result isa NoLimits.GHQuadratureMAPResult
 
         obj = get_objective(res)
         @test isfinite(obj)
@@ -890,7 +890,7 @@ end
 
     # ── All accessors work ───────────────────────────────────────────────────
     @testset "Accessors" begin
-        res = fit_model(dm_map, SparseGridMAP(level=1; optim_kwargs=(maxiters=200,)))
+        res = fit_model(dm_map, GHQuadratureMAP(level=1; optim_kwargs=(maxiters=200,)))
 
         re = get_random_effects(dm_map, res)
         @test re isa NamedTuple
@@ -905,7 +905,7 @@ end
         @test ll < 0   # log-likelihood itself is negative
     end
 
-    # ── SparseGrid vs SparseGridMAP: MAP pulls parameters toward prior ───────
+    # ── GHQuadrature vs GHQuadratureMAP: MAP pulls parameters toward prior ───────
     @testset "MAP regularization pulls toward prior" begin
         # With a strong Normal(0, 0.5) prior on a, MAP estimate of a should
         # be closer to 0 than MLE estimate on same data.
@@ -932,8 +932,8 @@ end
         df_t = DataFrame(ID=ids, t=ts, y=ys)
         dm_t = DataModel(model_tight, df_t; primary_id=:ID, time_col=:t)
 
-        res_mle = fit_model(dm_t, SparseGrid(level=1; optim_kwargs=(maxiters=300,)))
-        res_map = fit_model(dm_t, SparseGridMAP(level=1; optim_kwargs=(maxiters=300,)))
+        res_mle = fit_model(dm_t, GHQuadrature(level=1; optim_kwargs=(maxiters=300,)))
+        res_map = fit_model(dm_t, GHQuadratureMAP(level=1; optim_kwargs=(maxiters=300,)))
 
         a_mle = NoLimits.get_params(res_mle; scale=:untransformed).a
         a_map = NoLimits.get_params(res_map; scale=:untransformed).a
@@ -942,7 +942,7 @@ end
         @test abs(a_map) < abs(a_mle)
     end
 
-    # ── Error: SparseGridMAP with no-prior model ─────────────────────────────
+    # ── Error: GHQuadratureMAP with no-prior model ─────────────────────────────
     @testset "Errors without priors" begin
         model_noprior = @Model begin
             @fixedEffects begin
@@ -963,18 +963,18 @@ end
         df_n = DataFrame(ID=repeat(1:3, inner=2), t=[1.0,2.0,1.0,2.0,1.0,2.0],
                          y=randn(MersenneTwister(1), 6))
         dm_n = DataModel(model_noprior, df_n; primary_id=:ID, time_col=:t)
-        @test_throws ErrorException fit_model(dm_n, SparseGridMAP(level=1))
+        @test_throws ErrorException fit_model(dm_n, GHQuadratureMAP(level=1))
     end
 
-end  # @testset "SparseGridMAP"
+end  # @testset "GHQuadratureMAP"
 
-@testset "SparseGrid Wald UQ" begin
+@testset "GHQuadrature Wald UQ" begin
 
-    dm_uq = _make_map_sparsegrid_dm()
+    dm_uq = _make_map_ghq_dm()
 
-    # ── SparseGrid Wald (default ForwardDiff Hessian) ────────────────────────
-    @testset "compute_uq SparseGrid level=2" begin
-        res = fit_model(dm_uq, SparseGrid(level=2; optim_kwargs=(maxiters=400,)))
+    # ── GHQuadrature Wald (default ForwardDiff Hessian) ────────────────────────
+    @testset "compute_uq GHQuadrature level=2" begin
+        res = fit_model(dm_uq, GHQuadrature(level=2; optim_kwargs=(maxiters=400,)))
         uq  = compute_uq(res; method=:wald, pseudo_inverse=true)
 
         @test uq isa NoLimits.UQResult
@@ -992,9 +992,9 @@ end  # @testset "SparseGridMAP"
         @test cia.lower.σ > 0.0   # σ on natural scale must be positive
     end
 
-    # ── SparseGridMAP Wald (adds prior) ───────────────────────────────────────
-    @testset "compute_uq SparseGridMAP level=2" begin
-        res = fit_model(dm_uq, SparseGridMAP(level=2; optim_kwargs=(maxiters=400,)))
+    # ── GHQuadratureMAP Wald (adds prior) ───────────────────────────────────────
+    @testset "compute_uq GHQuadratureMAP level=2" begin
+        res = fit_model(dm_uq, GHQuadratureMAP(level=2; optim_kwargs=(maxiters=400,)))
         uq  = compute_uq(res; method=:wald, pseudo_inverse=true)
 
         @test uq isa NoLimits.UQResult
@@ -1005,8 +1005,8 @@ end  # @testset "SparseGridMAP"
     end
 
     # ── Sandwich vcov ────────────────────────────────────────────────────────
-    @testset "compute_uq SparseGrid sandwich vcov level=2" begin
-        res = fit_model(dm_uq, SparseGrid(level=2; optim_kwargs=(maxiters=400,)))
+    @testset "compute_uq GHQuadrature sandwich vcov level=2" begin
+        res = fit_model(dm_uq, GHQuadrature(level=2; optim_kwargs=(maxiters=400,)))
         uq  = compute_uq(res; method=:wald, vcov=:sandwich, pseudo_inverse=true)
 
         @test uq isa NoLimits.UQResult
@@ -1016,8 +1016,8 @@ end  # @testset "SparseGridMAP"
     end
 
     # ── hessian_backend :fd_gradient also works ───────────────────────────────
-    @testset "compute_uq SparseGrid fd_gradient backend level=2" begin
-        res = fit_model(dm_uq, SparseGrid(level=2; optim_kwargs=(maxiters=400,)))
+    @testset "compute_uq GHQuadrature fd_gradient backend level=2" begin
+        res = fit_model(dm_uq, GHQuadrature(level=2; optim_kwargs=(maxiters=400,)))
         uq  = compute_uq(res; method=:wald, hessian_backend=:fd_gradient, pseudo_inverse=true)
 
         @test uq isa NoLimits.UQResult
@@ -1026,14 +1026,14 @@ end  # @testset "SparseGridMAP"
         @test isfinite(cia.lower.a) && isfinite(cia.upper.a)
     end
 
-end  # @testset "SparseGrid Wald UQ"
+end  # @testset "GHQuadrature Wald UQ"
 
-@testset "SparseGrid Profile UQ" begin
+@testset "GHQuadrature Profile UQ" begin
 
-    dm_uq = _make_map_sparsegrid_dm()
+    dm_uq = _make_map_ghq_dm()
 
-    @testset "compute_uq SparseGrid :profile level=2" begin
-        res = fit_model(dm_uq, SparseGrid(level=2; optim_kwargs=(maxiters=400,)))
+    @testset "compute_uq GHQuadrature :profile level=2" begin
+        res = fit_model(dm_uq, GHQuadrature(level=2; optim_kwargs=(maxiters=400,)))
         uq  = compute_uq(res; method=:profile)
 
         @test uq isa NoLimits.UQResult
@@ -1043,14 +1043,14 @@ end  # @testset "SparseGrid Wald UQ"
         @test cia.lower.a < cia.upper.a
     end
 
-end  # @testset "SparseGrid Profile UQ"
+end  # @testset "GHQuadrature Profile UQ"
 
-@testset "SparseGrid mcmc_refit UQ" begin
+@testset "GHQuadrature mcmc_refit UQ" begin
 
-    dm_uq = _make_map_sparsegrid_dm()
+    dm_uq = _make_map_ghq_dm()
 
-    @testset "compute_uq SparseGridMAP :mcmc_refit" begin
-        res = fit_model(dm_uq, SparseGridMAP(level=1; optim_kwargs=(maxiters=200,)))
+    @testset "compute_uq GHQuadratureMAP :mcmc_refit" begin
+        res = fit_model(dm_uq, GHQuadratureMAP(level=1; optim_kwargs=(maxiters=200,)))
         uq  = compute_uq(res;
                          method=:mcmc_refit,
                          mcmc_sampler=Turing.MH(),
@@ -1062,9 +1062,9 @@ end  # @testset "SparseGrid Profile UQ"
         @test isfinite(cia.lower.a) && isfinite(cia.upper.a)
     end
 
-    @testset "compute_uq SparseGrid :mcmc_refit (with priors)" begin
-        # SparseGrid with priors on all fixed effects can use mcmc_refit
-        res = fit_model(dm_uq, SparseGrid(level=1; optim_kwargs=(maxiters=200,)))
+    @testset "compute_uq GHQuadrature :mcmc_refit (with priors)" begin
+        # GHQuadrature with priors on all fixed effects can use mcmc_refit
+        res = fit_model(dm_uq, GHQuadrature(level=1; optim_kwargs=(maxiters=200,)))
         uq  = compute_uq(res;
                          method=:mcmc_refit,
                          mcmc_sampler=Turing.MH(),
@@ -1076,17 +1076,17 @@ end  # @testset "SparseGrid Profile UQ"
         @test isfinite(cia.lower.a) && isfinite(cia.upper.a)
     end
 
-end  # @testset "SparseGrid mcmc_refit UQ"
+end  # @testset "GHQuadrature mcmc_refit UQ"
 
-@testset "SparseGrid parallelization (EnsembleThreads)" begin
+@testset "GHQuadrature parallelization (EnsembleThreads)" begin
 
-    dm_par = _make_simple_sparsegrid_dm(; n_id=10, n_obs=5)
+    dm_par = _make_simple_ghq_dm(; n_id=10, n_obs=5)
 
     # ── EnsembleThreads produces same objective as EnsembleSerial ─────────────
     @testset "EnsembleThreads matches EnsembleSerial objective" begin
-        res_serial   = fit_model(dm_par, SparseGrid(level=2; optim_kwargs=(maxiters=300,));
+        res_serial   = fit_model(dm_par, GHQuadrature(level=2; optim_kwargs=(maxiters=300,));
                                  serialization=EnsembleSerial())
-        res_threaded = fit_model(dm_par, SparseGrid(level=2; optim_kwargs=(maxiters=300,));
+        res_threaded = fit_model(dm_par, GHQuadrature(level=2; optim_kwargs=(maxiters=300,));
                                  serialization=EnsembleThreads())
 
         # Objectives should agree within numerical tolerance (same deterministic quadrature)
@@ -1097,17 +1097,17 @@ end  # @testset "SparseGrid mcmc_refit UQ"
         @test nrow(re_t.η) == 10
     end
 
-    @testset "SparseGridMAP EnsembleThreads runs without error" begin
-        dm_m = _make_map_sparsegrid_dm()
-        res = fit_model(dm_m, SparseGridMAP(level=2; optim_kwargs=(maxiters=300,));
+    @testset "GHQuadratureMAP EnsembleThreads runs without error" begin
+        dm_m = _make_map_ghq_dm()
+        res = fit_model(dm_m, GHQuadratureMAP(level=2; optim_kwargs=(maxiters=300,));
                         serialization=EnsembleThreads())
-        @test res.result isa NoLimits.SparseGridMAPResult
+        @test res.result isa NoLimits.GHQuadratureMAPResult
         @test isfinite(get_objective(res))
     end
 
-end  # @testset "SparseGrid parallelization (EnsembleThreads)"
+end  # @testset "GHQuadrature parallelization (EnsembleThreads)"
 
-@testset "SparseGrid node deduplication" begin
+@testset "GHQuadrature node deduplication" begin
 
     # d=1, L=3: GH-3 has 3 unique nodes → same before/after dedup
     @testset "d=1 no duplicates" begin
@@ -1144,20 +1144,20 @@ end  # @testset "SparseGrid parallelization (EnsembleThreads)"
     end
 
     # Dedup is idempotent: building twice gives same result
-    @testset "n_sparsegrid_points matches build_sparse_grid after dedup" begin
+    @testset "n_ghq_points matches build_sparse_grid after dedup" begin
         for (d, l) in [(1,1),(1,2),(2,1),(2,2),(2,3),(3,2)]
             sg = build_sparse_grid(d, l)
-            @test NoLimits.n_sparsegrid_points(d, l) == size(sg.nodes, 2)
+            @test NoLimits.n_ghq_points(d, l) == size(sg.nodes, 2)
         end
     end
 
-end  # @testset "SparseGrid node deduplication"
+end  # @testset "GHQuadrature node deduplication"
 
 # ============================================================
 # LogNormalRE and BoundedRE (Beta) transport maps
 # ============================================================
 
-@testset "SparseGrid LogNormal RE" begin
+@testset "GHQuadrature LogNormal RE" begin
 
     # LogNormal(μ_log, σ_log): η = exp(μ_log + σ_log * z), logcorrection = 0.
     # The push-forward of N(0,1) under this map is LogNormal(μ_log, σ_log),
@@ -1199,7 +1199,7 @@ end  # @testset "SparseGrid node deduplication"
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
 
         # Level 2 should work
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=100,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=100,)))
 
         @test NoLimits.get_converged(res)
         p = NoLimits.get_params(res; scale=:untransformed)
@@ -1239,7 +1239,7 @@ end  # @testset "SparseGrid node deduplication"
 
         df  = DataFrame(ID=ids, t=tobs, y=yobs)
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=80,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=80,)))
 
         re = NoLimits.get_random_effects(dm, res)
         @test re isa NamedTuple
@@ -1267,13 +1267,13 @@ end  # @testset "SparseGrid node deduplication"
         df = DataFrame(ID=[1, 1], t=[1.0, 2.0], y=[1.0, 1.1])
         dm = DataModel(model, df; primary_id=:ID, time_col=:t)
         # Should not throw
-        @test_nowarn NoLimits._sparsegrid_validate_re_distributions(dm)
+        @test_nowarn NoLimits._ghq_validate_re_distributions(dm)
     end
 
-end  # @testset "SparseGrid LogNormal RE"
+end  # @testset "GHQuadrature LogNormal RE"
 
 
-@testset "SparseGrid Beta RE" begin
+@testset "GHQuadrature Beta RE" begin
 
     # Beta(α, β): η = logistic(z), z ~ N(0,1) reference.
     # logcorrection = logpdf(Beta(α,β), logistic(z)) + log(logistic(z))
@@ -1318,7 +1318,7 @@ end  # @testset "SparseGrid LogNormal RE"
         df  = DataFrame(ID=ids, t=tobs, y=yobs)
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
 
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=150,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=150,)))
 
         @test NoLimits.get_converged(res)
         p = NoLimits.get_params(res; scale=:untransformed)
@@ -1359,7 +1359,7 @@ end  # @testset "SparseGrid LogNormal RE"
 
         df  = DataFrame(ID=ids, t=tobs, y=yobs)
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=100,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=100,)))
 
         re = NoLimits.get_random_effects(dm, res)
         @test re isa NamedTuple
@@ -1390,10 +1390,10 @@ end  # @testset "SparseGrid LogNormal RE"
         end
         df = DataFrame(ID=[1, 1], t=[1.0, 2.0], y=[0.5, 0.6])
         dm = DataModel(model, df; primary_id=:ID, time_col=:t)
-        @test_nowarn NoLimits._sparsegrid_validate_re_distributions(dm)
+        @test_nowarn NoLimits._ghq_validate_re_distributions(dm)
     end
 
-end  # @testset "SparseGrid Beta RE"
+end  # @testset "GHQuadrature Beta RE"
 
 # ============================================================
 # Phase 3: Additional 1D rules (GL, CC)
@@ -1543,8 +1543,8 @@ end  # @testset "Additional 1D quadrature rules"
         dm = DataModel(model, df; primary_id=:ID, time_col=:t)
 
         # Anisotropic level: η at level 2 (isotropic would use same level for all)
-        res_iso  = fit_model(dm, SparseGrid(level=2; optim_kwargs=(maxiters=200,)))
-        res_aniso = fit_model(dm, SparseGrid(level=(η=2,); optim_kwargs=(maxiters=200,)))
+        res_iso  = fit_model(dm, GHQuadrature(level=2; optim_kwargs=(maxiters=200,)))
+        res_aniso = fit_model(dm, GHQuadrature(level=(η=2,); optim_kwargs=(maxiters=200,)))
 
         @test NoLimits.get_converged(res_iso)
         @test NoLimits.get_converged(res_aniso)
@@ -1589,7 +1589,7 @@ end  # @testset "Additional 1D quadrature rules"
         dm = DataModel(model, df; primary_id=:ID, time_col=:t)
 
         # (nonexistent=5,) → η defaults to level 1
-        res = fit_model(dm, SparseGrid(level=(nonexistent=5,); optim_kwargs=(maxiters=150,)))
+        res = fit_model(dm, GHQuadrature(level=(nonexistent=5,); optim_kwargs=(maxiters=150,)))
         @test NoLimits.get_converged(res)
         @test isfinite(NoLimits.get_objective(res))
     end
@@ -1601,7 +1601,7 @@ end  # @testset "Anisotropic sparse grids"
 # Gamma, Exponential, Weibull, TDist RE distributions
 # ============================================================
 
-@testset "SparseGrid Gamma RE" begin
+@testset "GHQuadrature Gamma RE" begin
 
     @testset "fit_model with Gamma RE" begin
         rng = MersenneTwister(301)
@@ -1632,7 +1632,7 @@ end  # @testset "Anisotropic sparse grids"
 
         df  = DataFrame(ID=ids, t=tobs, y=yobs)
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=150,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=150,)))
 
         @test NoLimits.get_converged(res)
         p = NoLimits.get_params(res; scale=:untransformed)
@@ -1661,7 +1661,7 @@ end  # @testset "Anisotropic sparse grids"
         end
         df  = DataFrame(ID=ids, t=tobs, y=yobs)
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=80,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=80,)))
 
         re = NoLimits.get_random_effects(dm, res)
         @test re isa NamedTuple && haskey(re, :η)
@@ -1684,13 +1684,13 @@ end  # @testset "Anisotropic sparse grids"
         end
         df = DataFrame(ID=[1, 1], t=[1.0, 2.0], y=[1.0, 1.5])
         dm = DataModel(model, df; primary_id=:ID, time_col=:t)
-        @test_nowarn NoLimits._sparsegrid_validate_re_distributions(dm)
+        @test_nowarn NoLimits._ghq_validate_re_distributions(dm)
     end
 
-end  # @testset "SparseGrid Gamma RE"
+end  # @testset "GHQuadrature Gamma RE"
 
 
-@testset "SparseGrid Exponential RE" begin
+@testset "GHQuadrature Exponential RE" begin
 
     @testset "fit_model with Exponential RE" begin
         rng = MersenneTwister(401)
@@ -1715,7 +1715,7 @@ end  # @testset "SparseGrid Gamma RE"
 
         df  = DataFrame(ID=ids, t=tobs, y=yobs)
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=150,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=150,)))
 
         @test NoLimits.get_converged(res)
         p = NoLimits.get_params(res; scale=:untransformed)
@@ -1740,15 +1740,15 @@ end  # @testset "SparseGrid Gamma RE"
         end
         df = DataFrame(ID=ids, t=tobs, y=yobs)
         dm = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=80,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=80,)))
         re = NoLimits.get_random_effects(dm, res)
         @test all(re.η.η_1 .> 0)
     end
 
-end  # @testset "SparseGrid Exponential RE"
+end  # @testset "GHQuadrature Exponential RE"
 
 
-@testset "SparseGrid Weibull RE" begin
+@testset "GHQuadrature Weibull RE" begin
 
     @testset "fit_model with Weibull RE" begin
         rng = MersenneTwister(501)
@@ -1773,7 +1773,7 @@ end  # @testset "SparseGrid Exponential RE"
 
         df  = DataFrame(ID=ids, t=tobs, y=yobs)
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=150,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=150,)))
 
         @test NoLimits.get_converged(res)
         p = NoLimits.get_params(res; scale=:untransformed)
@@ -1799,15 +1799,15 @@ end  # @testset "SparseGrid Exponential RE"
         end
         df = DataFrame(ID=ids, t=tobs, y=yobs)
         dm = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=80,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=80,)))
         re = NoLimits.get_random_effects(dm, res)
         @test all(re.η.η_1 .> 0)
     end
 
-end  # @testset "SparseGrid Weibull RE"
+end  # @testset "GHQuadrature Weibull RE"
 
 
-@testset "SparseGrid TDist RE" begin
+@testset "GHQuadrature TDist RE" begin
 
     @testset "fit_model with TDist RE" begin
         # TDist(ν): heavy-tailed, ℝ-supported.  Identity transport.
@@ -1833,7 +1833,7 @@ end  # @testset "SparseGrid Weibull RE"
 
         df  = DataFrame(ID=ids, t=tobs, y=yobs)
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=150,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=150,)))
 
         @test NoLimits.get_converged(res)
         p = NoLimits.get_params(res; scale=:untransformed)
@@ -1859,16 +1859,16 @@ end  # @testset "SparseGrid Weibull RE"
         end
         df = DataFrame(ID=ids, t=tobs, y=yobs)
         dm = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=80,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=80,)))
         re = NoLimits.get_random_effects(dm, res)
         @test re isa NamedTuple && haskey(re, :η)
         @test nrow(re.η) == n_id
     end
 
-end  # @testset "SparseGrid TDist RE"
+end  # @testset "GHQuadrature TDist RE"
 
 
-@testset "SparseGrid generic ContinuousUnivariateDistribution fallback" begin
+@testset "GHQuadrature generic ContinuousUnivariateDistribution fallback" begin
 
     # Laplace(μ, b): ℝ-supported, identity transport — hits generic branch
     @testset "Laplace RE (ℝ-supported generic)" begin
@@ -1892,7 +1892,7 @@ end  # @testset "SparseGrid TDist RE"
         end
         df  = DataFrame(ID=ids, t=tobs, y=yobs)
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=100,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=100,)))
         @test NoLimits.get_converged(res)
         @test isfinite(NoLimits.get_objective(res))
     end
@@ -1919,21 +1919,21 @@ end  # @testset "SparseGrid TDist RE"
         end
         df  = DataFrame(ID=ids, t=tobs, y=yobs)
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, NoLimits.SparseGrid(level=2; optim_kwargs=(maxiters=100,)))
+        res = fit_model(dm, NoLimits.GHQuadrature(level=2; optim_kwargs=(maxiters=100,)))
         @test NoLimits.get_converged(res)
         @test isfinite(NoLimits.get_objective(res))
         re = NoLimits.get_random_effects(dm, res)
         @test all(re.η.η_1 .> 0)
     end
 
-end  # @testset "SparseGrid generic ContinuousUnivariateDistribution fallback"
+end  # @testset "GHQuadrature generic ContinuousUnivariateDistribution fallback"
 
 
 # ============================================================
 # Progressive refinement: level::Vector{Int}
 # ============================================================
 
-@testset "SparseGrid progressive refinement (level::Vector{Int})" begin
+@testset "GHQuadrature progressive refinement (level::Vector{Int})" begin
 
     function _make_progressive_dm(; n_id=10, n_obs=5, rng=MersenneTwister(42))
         ids  = repeat(1:n_id, inner=n_obs)
@@ -1957,7 +1957,7 @@ end  # @testset "SparseGrid generic ContinuousUnivariateDistribution fallback"
 
     @testset "level=[1,2] converges and result is scalar-level" begin
         dm  = _make_progressive_dm()
-        res = fit_model(dm, SparseGrid(level=[1, 2]; optim_kwargs=(maxiters=200,)))
+        res = fit_model(dm, GHQuadrature(level=[1, 2]; optim_kwargs=(maxiters=200,)))
         @test NoLimits.get_converged(res)
         @test isfinite(NoLimits.get_objective(res))
         # Returned method should carry the last scalar level (2)
@@ -1967,15 +1967,15 @@ end  # @testset "SparseGrid generic ContinuousUnivariateDistribution fallback"
     @testset "level=[1] (single-element) behaves like level=1" begin
         rng = MersenneTwister(1)
         dm  = _make_progressive_dm(; rng=rng)
-        res_vec    = fit_model(dm, SparseGrid(level=[1];    optim_kwargs=(maxiters=200,)))
-        res_scalar = fit_model(dm, SparseGrid(level=1;      optim_kwargs=(maxiters=200,)))
+        res_vec    = fit_model(dm, GHQuadrature(level=[1];    optim_kwargs=(maxiters=200,)))
+        res_scalar = fit_model(dm, GHQuadrature(level=1;      optim_kwargs=(maxiters=200,)))
         @test NoLimits.get_converged(res_vec)
         @test abs(NoLimits.get_objective(res_vec) - NoLimits.get_objective(res_scalar)) < 1e-4
     end
 
     @testset "level=[1,2,3] three-stage refinement" begin
         dm  = _make_progressive_dm()
-        res = fit_model(dm, SparseGrid(level=[1, 2, 3]; optim_kwargs=(maxiters=150,)))
+        res = fit_model(dm, GHQuadrature(level=[1, 2, 3]; optim_kwargs=(maxiters=150,)))
         @test NoLimits.get_converged(res)
         @test NoLimits.get_method(res).level == 3
         p = NoLimits.get_params(res; scale=:untransformed)
@@ -1984,7 +1984,7 @@ end  # @testset "SparseGrid generic ContinuousUnivariateDistribution fallback"
 
     @testset "level=[1,2] result compatible with all accessors" begin
         dm  = _make_progressive_dm()
-        res = fit_model(dm, SparseGrid(level=[1, 2]; optim_kwargs=(maxiters=150,)))
+        res = fit_model(dm, GHQuadrature(level=[1, 2]; optim_kwargs=(maxiters=150,)))
         @test isfinite(NoLimits.get_objective(res))
         @test NoLimits.get_iterations(res) isa Integer
         re = NoLimits.get_random_effects(dm, res)
@@ -1993,7 +1993,7 @@ end  # @testset "SparseGrid generic ContinuousUnivariateDistribution fallback"
         @test isfinite(ll)
     end
 
-    @testset "SparseGridMAP level=[1,2] works" begin
+    @testset "GHQuadratureMAP level=[1,2] works" begin
         rng  = MersenneTwister(7)
         n_id = 10; n_obs = 5
         ids  = repeat(1:n_id, inner=n_obs)
@@ -2013,19 +2013,19 @@ end  # @testset "SparseGrid generic ContinuousUnivariateDistribution fallback"
         end
         df  = DataFrame(ID=ids, t=tobs, y=yobs)
         dm  = DataModel(model, df; primary_id=:ID, time_col=:t)
-        res = fit_model(dm, SparseGridMAP(level=[1, 2]; optim_kwargs=(maxiters=200,)))
+        res = fit_model(dm, GHQuadratureMAP(level=[1, 2]; optim_kwargs=(maxiters=200,)))
         @test NoLimits.get_converged(res)
         @test NoLimits.get_method(res).level == 2
     end
 
     @testset "empty level vector throws" begin
         dm = _make_progressive_dm()
-        @test_throws ErrorException fit_model(dm, SparseGrid(level=Int[]))
+        @test_throws ErrorException fit_model(dm, GHQuadrature(level=Int[]))
     end
 
     @testset "non-positive level entry throws" begin
         dm = _make_progressive_dm()
-        @test_throws ErrorException fit_model(dm, SparseGrid(level=[1, 0]))
+        @test_throws ErrorException fit_model(dm, GHQuadrature(level=[1, 0]))
     end
 
-end  # @testset "SparseGrid progressive refinement"
+end  # @testset "GHQuadrature progressive refinement"
