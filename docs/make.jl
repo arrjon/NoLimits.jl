@@ -31,6 +31,7 @@ makedocs(;
             "Overview" => "estimation/index.md",
             "Laplace" => "estimation/laplace.md",
             "Laplace MAP" => "estimation/laplace-map.md",
+            "GH Quadrature" => "estimation/ghquadrature.md",
             "MCEM" => "estimation/mcem.md",
             "SAEM" => "estimation/saem.md",
             "MCMC" => "estimation/mcmc.md",

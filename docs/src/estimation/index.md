@@ -33,7 +33,7 @@ The choice of method depends on whether the model includes random effects and on
 
 | Model type | Methods | Notes |
 | --- | --- | --- |
-| Mixed-effects | `Laplace`, `LaplaceMAP`, `MCEM`, `SAEM`, `MCMC`, `VI` | Require random effects in the model |
+| Mixed-effects | `Laplace`, `LaplaceMAP`, `GHQuadrature`, `GHQuadratureMAP`, `MCEM`, `SAEM`, `MCMC`, `VI` | Require random effects in the model |
 | Fixed-effects only | `MLE`, `MAP`, `MCMC`, `VI` | `MLE` is likelihood-only; `MAP` adds priors; `MCMC`/`VI` are Bayesian |
 | Cross-method | `Multistart` | Wrapper that runs repeated fits from different starting values |
 
