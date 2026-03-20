@@ -57,12 +57,18 @@ struct LaplaceREIndex{L, M}
     level_to_index::M
 end
 
-struct LaplaceRECache{N, D, S, I, X}
+struct LaplaceRECache{N, D, S, I, X, TMP}
     re_names::N
     dims::D
     is_scalar::S
     ind_level_ids::I
     re_index::X
+    # Pre-computed Float64 ComponentArray template for fast η_ind construction.
+    # Concrete-typed (via TMP) so that `ComponentArray(vals, getaxes(eta_template))`
+    # is type-stable for any element type T.
+    # `nothing` (TMP=Nothing) for the rare heterogeneous case (individuals with
+    # different numbers of RE levels per RE group).
+    eta_template::TMP
 end
 
 struct REIndividualRowIndex{LA, LO, PA, PO}
@@ -1163,7 +1169,25 @@ function _build_laplace_re_cache(model, individuals, values_nt)
         fill!(dims, 0)
         fill!(is_scalar, true)
     end
-    return LaplaceRECache(re_names, dims, is_scalar, ind_level_ids, re_index)
+    # Build a concrete-typed Float64 template for the common case where every
+    # individual has exactly one RE level per RE group (e.g. column=:ID).
+    # Used by `_build_eta_ind` to avoid Pair{Symbol,Any}[] boxing on the hot path.
+    eta_template = if !isempty(individuals) && !isempty(re_names) &&
+                      all(all(length(ind_level_ids[i][ri]) == 1 for ri in 1:nre)
+                          for i in eachindex(ind_level_ids))
+        nt_pairs = Pair{Symbol, Any}[]
+        for (ri, re) in enumerate(re_names)
+            if is_scalar[ri] || dims[ri] == 1
+                push!(nt_pairs, re => 0.0)
+            else
+                push!(nt_pairs, re => zeros(dims[ri]))
+            end
+        end
+        ComponentArray(NamedTuple(nt_pairs))
+    else
+        nothing
+    end
+    return LaplaceRECache(re_names, dims, is_scalar, ind_level_ids, re_index, eta_template)
 end
 
 """

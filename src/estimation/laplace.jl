@@ -1050,6 +1050,11 @@ function _build_eta_ind(dm::DataModel,
                         const_cache::LaplaceConstantsCache,
                         θ::ComponentArray)
     cache = dm.re_group_info.laplace_cache
+    template = cache.eta_template
+    if template !== nothing
+        return _build_eta_ind_fast(template, ind_idx, batch_info, b, const_cache, cache)
+    end
+    # Slow path: heterogeneous case (some individuals have multiple levels per RE group).
     re_names = cache.re_names
     nt_pairs = Pair{Symbol, Any}[]
     T = eltype(b)
@@ -1110,13 +1115,64 @@ function _build_eta_ind(dm::DataModel,
     return ComponentArray(nt)
 end
 
+# Fast path for `_build_eta_ind`: used when every individual has exactly one RE level
+# per RE group (the common case, e.g. `column=:ID`). Avoids Pair{Symbol,Any}[] boxing
+# by filling a flat Vector{T} and wrapping it with pre-computed axes.
+function _build_eta_ind_fast(template::ComponentArray{Float64},
+                              ind_idx::Int,
+                              batch_info::_LaplaceBatchInfo,
+                              b,
+                              const_cache::LaplaceConstantsCache,
+                              cache)
+    T = eltype(b)
+    n = length(template)
+    vals = Vector{T}(undef, n)
+    re_names = cache.re_names
+    out_pos = 1
+    for (ri, re) in enumerate(re_names)
+        info = batch_info.re_info[ri]
+        id = cache.ind_level_ids[ind_idx][ri][1]
+        const_mask = const_cache.is_const[ri]
+        if const_mask[id]
+            if info.is_scalar || info.dim == 1
+                @inbounds vals[out_pos] = T(const_cache.scalar_vals[ri][id])
+                out_pos += 1
+            else
+                cv = const_cache.vector_vals[ri][id]
+                d = info.dim
+                @inbounds for k in 1:d
+                    vals[out_pos + k - 1] = T(cv[k])
+                end
+                out_pos += d
+            end
+        else
+            b_idx = info.map.level_to_index[id]
+            b_idx == 0 && error("Missing random effect value for $(re) level $(cache.re_index[ri].levels[id]).")
+            r = info.ranges[b_idx]
+            if info.is_scalar || info.dim == 1
+                @inbounds vals[out_pos] = b[first(r)]
+                out_pos += 1
+            else
+                d = info.dim
+                r_start = first(r)
+                @inbounds for k in 1:d
+                    vals[out_pos + k - 1] = b[r_start + k - 1]
+                end
+                out_pos += d
+            end
+        end
+    end
+    return ComponentArray(vals, getaxes(template))
+end
+
 function _laplace_logf_batch(dm::DataModel,
                              batch_info::_LaplaceBatchInfo,
                              θ::ComponentArray,
                              b,
                              const_cache::LaplaceConstantsCache,
                              cache::_LLCache)
-    ll = 0.0
+    T_ll = promote_type(eltype(θ), eltype(b))
+    ll = zero(T_ll)
     model_funs = cache.model_funs
     helpers = cache.helpers
     θ_re = _symmetrize_psd_params(θ, dm.model.fixed.fixed)

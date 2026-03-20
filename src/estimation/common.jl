@@ -974,7 +974,7 @@ function _loglikelihood_individual(dm::DataModel, idx::Int, θ, η_ind, cache::_
     ll = zero(T_el)
     obs_cols = dm.config.obs_cols
     rowwise_re = _needs_rowwise_random_effects(dm, idx; obs_only=true)
-    hmm_priors = Dict{Symbol, Any}()
+    hmm_priors = nothing  # lazily initialised on first HMM observation to avoid Dict alloc for non-HMM models
     hmm_seen = nothing
     hmm_init = nothing
     T_hmm = T_el
@@ -1020,7 +1020,10 @@ function _loglikelihood_individual(dm::DataModel, idx::Int, θ, η_ind, cache::_
                     DiscreteTimeDiscreteStatesHMM(dist.transition_matrix, dist.emission_dists,
                                                   Distributions.Categorical(init_p; check_args=false))
                 end
-                prior = get(hmm_priors, col, nothing)
+                if hmm_priors === nothing
+                    hmm_priors = Dict{Symbol, Any}()
+                end
+                prior = get(hmm_priors::Dict{Symbol, Any}, col, nothing)
                 dist_use = try
                     _hmm_with_prior(dist_up, prior)
                 catch err
@@ -1030,7 +1033,7 @@ function _loglikelihood_individual(dm::DataModel, idx::Int, θ, η_ind, cache::_
                     rethrow(err)
                 end
                 if y === missing
-                    hmm_priors[col] = try
+                    (hmm_priors::Dict{Symbol, Any})[col] = try
                         probabilities_hidden_states(dist_use)
                     catch err
                         if err isa DomainError || err isa ArgumentError
@@ -1051,7 +1054,7 @@ function _loglikelihood_individual(dm::DataModel, idx::Int, θ, η_ind, cache::_
                 if !isfinite(v)
                     return -Inf
                 end
-                hmm_priors[col] = try
+                (hmm_priors::Dict{Symbol, Any})[col] = try
                     posterior_hidden_states(dist_use, y)
                 catch err
                     if err isa DomainError || err isa ArgumentError
