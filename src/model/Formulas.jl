@@ -245,15 +245,39 @@ function _formulas_state_used_bare(ex, state::Symbol)
     return false
 end
 
-function _formulas_replace_state_calls(ex, state_syms::Set{Symbol})
+function _formulas_replace_state_calls(ex, state_syms::Set{Symbol},
+                                        vc_time_syms::Set{Symbol} = Set{Symbol}())
     ex isa Expr || return ex
     if ex.head == :call
         f = ex.args[1]
-        if f isa Symbol && f in state_syms && length(ex.args) == 2 && _formulas_arg_uses_time(ex.args[2])
-            return Expr(:call, Expr(:., :sol_accessors, QuoteNode(f)), ex.args[2])
+        if f isa Symbol && f in state_syms && length(ex.args) == 2
+            arg = ex.args[2]
+            if _formulas_arg_uses_time(arg) || (arg isa Symbol && arg in vc_time_syms)
+                return Expr(:call, Expr(:., :sol_accessors, QuoteNode(f)), arg)
+            end
         end
     end
-    return Expr(ex.head, map(arg -> _formulas_replace_state_calls(arg, state_syms), ex.args)...)
+    return Expr(ex.head, map(arg -> _formulas_replace_state_calls(arg, state_syms, vc_time_syms), ex.args)...)
+end
+
+# Scan for S(vc) calls where S is a state/signal and vc is a varying covariate.
+# Populates `found_states` with state/signal names and `found_vc` with the vc symbols.
+function _formulas_collect_vc_state_calls!(ex, state_syms::Set{Symbol}, vc_syms::Set{Symbol},
+                                           found_states::Set{Symbol}, found_vc::Set{Symbol})
+    ex isa Expr || return
+    if ex.head == :call
+        f = ex.args[1]
+        if f isa Symbol && f in state_syms && length(ex.args) == 2
+            arg = ex.args[2]
+            if arg isa Symbol && arg in vc_syms
+                push!(found_states, f)
+                push!(found_vc, arg)
+            end
+        end
+    end
+    for arg in ex.args
+        _formulas_collect_vc_state_calls!(arg, state_syms, vc_syms, found_states, found_vc)
+    end
 end
 
 function _formulas_rewrite_all(ex, fun_syms::Set{Symbol})
@@ -359,11 +383,20 @@ function _formulas_build_formulas_expr(ir::FormulasIR,
         end
     end
 
+    # Also recognise S(vc) as a state-time call when vc is a varying covariate.
+    vc_time_args = Set{Symbol}()
+    let all_state_syms = Set(vcat(state_names, signal_names)),
+        vc_syms_early  = Set(varying_cov_names)
+        for ex in all_exprs
+            _formulas_collect_vc_state_calls!(ex, all_state_syms, vc_syms_early, time_call_syms, vc_time_args)
+        end
+    end
+
     required_states = [s for s in state_names if s in time_call_syms]
     required_signals = [s for s in signal_names if s in time_call_syms]
 
     state_call_syms = Set(vcat(required_states, required_signals))
-    all_exprs = [_formulas_replace_state_calls(ex, state_call_syms) for ex in all_exprs]
+    all_exprs = [_formulas_replace_state_calls(ex, state_call_syms, vc_time_args) for ex in all_exprs]
     det_exprs = all_exprs[1:length(det_exprs)]
     obs_exprs = all_exprs[length(det_exprs) + 1:end]
 
