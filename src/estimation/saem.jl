@@ -61,6 +61,40 @@ function _init_saem_q_cache(::Type{T}, nbatches::Int, serialization) where {T}
     return _SAEMQCache{T}(partial, batches_buf)
 end
 
+# O2+O4+O5: ring buffer for SA sample history — avoids push!/deleteat! and Matrix wrappers
+mutable struct _SAEMSampleStore
+    weights::Vector{Float64}                          # [slot] weight, preallocated
+    snaps::Vector{Vector{Vector{Float64}}}            # [slot][batch] re-values, preallocated
+    next_idx::Int                                     # 1-based next-write slot (wraps)
+    len::Int                                          # current fill count (0..capacity)
+    capacity::Int
+end
+
+function _init_saem_sample_store(capacity::Int, batch_infos::Vector{_LaplaceBatchInfo})
+    weights = zeros(Float64, capacity)
+    snaps = [[zeros(Float64, info.n_b) for info in batch_infos] for _ in 1:capacity]
+    return _SAEMSampleStore(weights, snaps, 1, 0, capacity)
+end
+
+function _saem_store_push!(store::_SAEMSampleStore, b_current, γ::Float64)
+    # Scale all existing weights in-place (no allocation)
+    one_minus_γ = 1.0 - γ
+    @inbounds for i in 1:store.len
+        store.weights[i] *= one_minus_γ
+    end
+    # Overwrite at next_idx (evicts oldest entry when full)
+    idx = store.next_idx
+    store.weights[idx] = γ
+    snaps_slot = store.snaps[idx]
+    @inbounds for bi in eachindex(b_current)
+        snap = snaps_slot[bi]
+        isempty(snap) || copyto!(snap, b_current[bi])
+    end
+    store.next_idx = store.next_idx == store.capacity ? 1 : store.next_idx + 1
+    store.len = store.len < store.capacity ? store.len + 1 : store.capacity
+    return store
+end
+
 @inline function _saem_thread_caches(dm::DataModel, ll_cache, nthreads::Int)
     if ll_cache isa Vector
         return ll_cache
@@ -1718,11 +1752,11 @@ function _saem_Q(dm::DataModel,
                  θ::ComponentArray,
                  const_cache::LaplaceConstantsCache,
                  ll_cache,
-                 samples_store::Vector{Vector{Matrix}},
-                 weights::Vector{Float64};
+                 store::_SAEMSampleStore;
                  serialization::SciMLBase.EnsembleAlgorithm=EnsembleSerial(),
                  q_cache::Union{Nothing, _SAEMQCache}=nothing)
     total = zero(eltype(θ))
+    store.len == 0 && return total
     if serialization isa SciMLBase.EnsembleThreads
         nthreads = Threads.maxthreadid()
         caches = _saem_thread_caches(dm, ll_cache, nthreads)
@@ -1739,18 +1773,13 @@ function _saem_Q(dm::DataModel,
             tid = Threads.threadid()
             info = batch_infos[bi]
             acc = zero(eltype(θ))
-            for (k, w) in enumerate(weights)
-                samples = samples_store[k][bi]
-                if size(samples, 2) == 0
-                    continue
-                end
-                for s in 1:size(samples, 2)
-                    b = view(samples, :, s)
-                    logf = _laplace_logf_batch(dm, info, θ, b, const_cache, caches[tid])
-                    !isfinite(logf) && (bad[] = true; break)
-                    acc += w * logf
-                end
-                bad[] && break
+            @inbounds for k in 1:store.len
+                w = store.weights[k]
+                snap = store.snaps[k][bi]
+                isempty(snap) && continue
+                logf = _laplace_logf_batch(dm, info, θ, snap, const_cache, caches[tid])
+                !isfinite(logf) && (bad[] = true; break)
+                acc += w * logf
             end
             bad[] && continue
             partial_obj[bi] = acc
@@ -1765,17 +1794,13 @@ function _saem_Q(dm::DataModel,
         ll_cache_local = ll_cache isa Vector ? ll_cache[1] : ll_cache
         for (bi, info) in enumerate(batch_infos)
             acc = zero(eltype(θ))
-            for (k, w) in enumerate(weights)
-                samples = samples_store[k][bi]
-                if size(samples, 2) == 0
-                    continue
-                end
-                for s in 1:size(samples, 2)
-                    b = view(samples, :, s)
-                    logf = _laplace_logf_batch(dm, info, θ, b, const_cache, ll_cache_local)
-                    !isfinite(logf) && return Inf
-                    acc += w * logf
-                end
+            @inbounds for k in 1:store.len
+                w = store.weights[k]
+                snap = store.snaps[k][bi]
+                isempty(snap) && continue
+                logf = _laplace_logf_batch(dm, info, θ, snap, const_cache, ll_cache_local)
+                !isfinite(logf) && return Inf
+                acc += w * logf
             end
             total += acc
         end
@@ -1869,8 +1894,7 @@ function _saem_builtin_mean_updates(dm::DataModel,
                                     const_cache::LaplaceConstantsCache,
                                     mean_params::Vector{Symbol},
                                     ll_cache::_LLCache,
-                                    samples_store::Vector{Vector{Matrix}},
-                                    weights::Vector{Float64},
+                                    sample_store::_SAEMSampleStore,
                                     transform,
                                     inv_transform;
                                     optimizer=OptimizationOptimJL.LBFGS(linesearch=LineSearches.BackTracking()),
@@ -1881,7 +1905,7 @@ function _saem_builtin_mean_updates(dm::DataModel,
     if dm.model.de.de === nothing
         _saem_glm_supported(dm, batch_infos, b_current, θu_curr, const_cache, ll_cache) || return NamedTuple()
     end
-    isempty(samples_store) && return NamedTuple()
+    sample_store.len == 0 && return NamedTuple()
 
     θt_curr = transform(θu_curr)
     mean_names = [n for n in mean_params if hasproperty(θt_curr, n)]
@@ -1900,7 +1924,7 @@ function _saem_builtin_mean_updates(dm::DataModel,
             setproperty!(θt_full, name, getproperty(θt_mean_ca, name))
         end
         θu = inv_transform(θt_full)
-        Q = _saem_Q(dm, batch_infos, θu, const_cache, ll_cache, samples_store, weights;
+        Q = _saem_Q(dm, batch_infos, θu, const_cache, ll_cache, sample_store;
                     serialization=serialization, q_cache=q_cache)
         !isfinite(Q) && return Inf
         obj = -Q + _penalty_value(θu, penalty)
@@ -2054,13 +2078,16 @@ function _fit_model(dm::DataModel, method::SAEM, args...;
     batch_rngs = _saem_thread_rngs(rng, length(batch_infos))
     b_current = [zeros(T0, info.n_b) for info in batch_infos]
 
-    weights = Float64[]
-    samples_store = Vector{Vector{Matrix}}()
+    # O2+O4+O5: preallocated ring buffer for SA sample history
+    sample_store = _init_saem_sample_store(method.saem.max_store, batch_infos)
     s = nothing
     builtin_stats_state = nothing
     closed_form_builtin_used = false
     closed_form_custom_used = false
     numeric_mstep_used = false
+
+    # O3: pre-allocated work buffer for per-iter constants — avoids deepcopy each iter
+    θ_const_u_work = deepcopy(θ0_u)
 
     θ_prev = copy(θt_free)
     θt_full_init = ComponentArray(eltype(θt_free).(θ_const_t), axs_full)
@@ -2074,15 +2101,17 @@ function _fit_model(dm::DataModel, method::SAEM, args...;
     converged = false
     progress = ProgressMeter.Progress(method.saem.maxiters; desc="SAEM", enabled=method.saem.progress)
 
+    # O1: hoist tkwargs construction — values never change during the run
+    tkwargs = method.saem.turing_kwargs
+    n_samples_saem = method.saem.mcmc_steps > 0 ? method.saem.mcmc_steps : get(tkwargs, :n_samples, 1)
+    tkwargs = merge(tkwargs, (n_samples=n_samples_saem,))
+    haskey(tkwargs, :n_adapt)   || (tkwargs = merge(tkwargs, (n_adapt=50,)))
+    haskey(tkwargs, :progress)  || (tkwargs = merge(tkwargs, (progress=false,)))
+    haskey(tkwargs, :verbose)   || (tkwargs = merge(tkwargs, (verbose=false,)))
+
     for iter in 1:method.saem.maxiters
         γ = _saem_gamma(iter, method.saem.t0, method.saem.kappa)
         updated = _saem_batches!(q_cache.batches_buf, method.saem.update_schedule, length(batch_infos), iter, rng)
-        tkwargs = method.saem.turing_kwargs
-        n_samples = method.saem.mcmc_steps > 0 ? method.saem.mcmc_steps : get(tkwargs, :n_samples, 1)
-        tkwargs = merge(tkwargs, (n_samples=n_samples,))
-        haskey(tkwargs, :n_adapt) || (tkwargs = merge(tkwargs, (n_adapt=50,)))
-        haskey(tkwargs, :progress) || (tkwargs = merge(tkwargs, (progress=false,)))
-        haskey(tkwargs, :verbose) || (tkwargs = merge(tkwargs, (verbose=false,)))
 
         θt_curr = θ_prev isa ComponentArray ? θ_prev : ComponentArray(θ_prev, axs_free)
         θt_full_curr = ComponentArray(T0.(θ_const_t), axs_full)
@@ -2118,27 +2147,8 @@ function _fit_model(dm::DataModel, method::SAEM, args...;
             s_new = method.saem.suffstats(dm, batch_infos, b_current, θu_curr, fixed_maps)
             s = _saem_stats_update(s, s_new, γ)
         else
-            # build snapshot for this iteration
-            snap = Vector{Matrix{T0}}(undef, length(batch_infos))
-            for (bi, info) in enumerate(batch_infos)
-                nb = info.n_b
-                if nb == 0
-                    snap[bi] = zeros(T0, 0, 0)
-                else
-                    snap[bi] = reshape(copy(b_current[bi]), nb, 1)
-                end
-            end
-
-            # update weights/store
-            for i in eachindex(weights)
-                weights[i] *= (1 - γ)
-            end
-            push!(weights, γ)
-            push!(samples_store, snap)
-            if length(weights) > method.saem.max_store
-                deleteat!(weights, 1)
-                deleteat!(samples_store, 1)
-            end
+            # O2+O4+O5: push into ring buffer in-place (no allocation, no Array shifts)
+            _saem_store_push!(sample_store, b_current, γ)
         end
 
 
@@ -2192,7 +2202,7 @@ function _fit_model(dm::DataModel, method::SAEM, args...;
                 cache = ll_cache isa Vector ? ll_cache[1] : ll_cache
                 mean_updates = _saem_builtin_mean_updates(dm, batch_infos, b_current,
                                                           ComponentArray(θu_curr, getaxes(θu_curr)), const_cache,
-                                                          mean_params, cache, samples_store, weights, transform, inv_transform;
+                                                          mean_params, cache, sample_store, transform, inv_transform;
                                                           optimizer=method.optimizer, optim_kwargs=method.optim_kwargs,
                                                           serialization=serialization, penalty=penalty)
                 if !isempty(mean_updates)
@@ -2207,9 +2217,10 @@ function _fit_model(dm::DataModel, method::SAEM, args...;
         free_names_iter = [n for n in fixed_names if !(n in keys(iter_constants))]
         θt_free = ComponentArray(NamedTuple{Tuple(free_names_iter)}(Tuple(getproperty(θt_full_curr, n) for n in free_names_iter)))
         axs_free = getaxes(θt_free)
-        θ_const_u_iter = deepcopy(θ0_u)
-        _apply_constants!(θ_const_u_iter, iter_constants)
-        θ_const_t_iter = transform(θ_const_u_iter)
+        # O3: reuse pre-allocated buffer instead of deepcopy each iteration
+        copyto!(θ_const_u_work, θ0_u)
+        _apply_constants!(θ_const_u_work, iter_constants)
+        θ_const_t_iter = transform(θ_const_u_work)
         axs_full_iter = getaxes(θ_const_t_iter)
         base_free_names = free_names_iter
         θ_const_t = θ_const_t_iter
@@ -2223,7 +2234,7 @@ function _fit_model(dm::DataModel, method::SAEM, args...;
             if method.saem.suffstats !== nothing && method.saem.q_from_stats !== nothing
                 Q_new = method.saem.q_from_stats(s, θu_new, dm)
             else
-                Q_new = _saem_Q(dm, batch_infos, θu_new, const_cache, ll_cache, samples_store, weights;
+                Q_new = _saem_Q(dm, batch_infos, θu_new, const_cache, ll_cache, sample_store;
                                 serialization=serialization, q_cache=q_cache)
             end
         else
@@ -2246,7 +2257,7 @@ function _fit_model(dm::DataModel, method::SAEM, args...;
                 θu = inv_transform(θt_full)
                 Q = method.saem.suffstats !== nothing && method.saem.q_from_stats !== nothing ?
                     method.saem.q_from_stats(s, θu, dm) :
-                    _saem_Q(dm, batch_infos, θu, const_cache, ll_cache, samples_store, weights;
+                    _saem_Q(dm, batch_infos, θu, const_cache, ll_cache, sample_store;
                             serialization=serialization, q_cache=q_cache)
                 !isfinite(Q) && return T(Inf)
                 obj = -Q + _penalty_value(θu, penalty)
@@ -2321,7 +2332,7 @@ function _fit_model(dm::DataModel, method::SAEM, args...;
             if method.saem.suffstats !== nothing && method.saem.q_from_stats !== nothing
                 Q_new = method.saem.q_from_stats(s, θu_new, dm)
             else
-                Q_new = _saem_Q(dm, batch_infos, θu_new, const_cache, ll_cache, samples_store, weights;
+                Q_new = _saem_Q(dm, batch_infos, θu_new, const_cache, ll_cache, sample_store;
                                serialization=serialization, q_cache=q_cache)
             end
         end
