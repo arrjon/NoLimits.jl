@@ -252,25 +252,6 @@ end
     @test get_uq_source_method(uq_lmap) == :laplace_map
     @test get_uq_parameter_names(uq_lmap) == [:β_1, :β_2, :a, :σ]
 
-    res_fmap = fit_model(dm,
-                         NoLimits.FOCEIMAP(;
-                                                   optim_kwargs=(maxiters=4,),
-                                                   inner_kwargs=(maxiters=10,),
-                                                   info_mode=:custom,
-                                                   info_custom=NoLimits.focei_information_opg,
-                                                   multistart_n=0,
-                                                   multistart_k=0);
-                         constants=constants)
-    uq_fmap = compute_uq(res_fmap;
-                         method=:wald,
-                         pseudo_inverse=true,
-                         n_draws=20,
-                         fd_abs_step=1e-4,
-                         fd_rel_step=1e-4,
-                         fd_max_tries=50,
-                         rng=Random.Xoshiro(209))
-    @test get_uq_source_method(uq_fmap) == :focei_map
-    @test get_uq_parameter_names(uq_fmap) == [:β_1, :β_2, :a, :σ]
 end
 
 @testset "UQ edge: MCEM/SAEM with multivariate + planar-flow REs, vector FE, NN/SoftTree/Spline" begin

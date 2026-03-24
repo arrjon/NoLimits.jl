@@ -188,6 +188,9 @@ const _CT_HMM_EQUIL_THRESHOLD = 200.0
 
 # Stationary distribution of Q: null eigenvector of Qᵀ with ∑πᵢ = 1.
 # Solved via the linear system [Qᵀ (last row replaced by 1…1)] π = e_n.
+# Returns nothing for non-ergodic Q (multiple communicating classes or absorbing states),
+# where the null space has dimension > 1 and the long-time limit of exp(Qt)v depends on v.
+# Non-ergodicity is detected by any π component being negative after solving.
 function _ct_hmm_stationary(Q::AbstractMatrix{T}) where T
     n = size(Q, 1)
     A = Matrix{T}(transpose(Q))
@@ -196,8 +199,22 @@ function _ct_hmm_stationary(Q::AbstractMatrix{T}) where T
     end
     b = zeros(T, n)
     b[n] = one(T)
-    π = A \ b
-    return π ./ sum(π)  # renormalize for floating-point safety
+    # For non-ergodic Q (multiple communicating classes or absorbing states) the
+    # system is rank-deficient.  `\` throws SingularException in the exactly
+    # singular case; near-singular cases produce a solution with negative
+    # components.  Both signal that the long-time limit depends on v, so we
+    # return nothing and let the caller fall back to expv.
+    local π
+    try
+        π = A \ b
+    catch e
+        e isa LinearAlgebra.SingularException && return nothing
+        rethrow(e)
+    end
+    tol = sqrt(eps(float(real(one(T)))))
+    any(x -> x < -tol, π) && return nothing
+    s = sum(π)
+    return π ./ s  # renormalize for floating-point safety
 end
 
 function _ct_hmm_probabilities_hidden_states(
@@ -216,7 +233,9 @@ function _ct_hmm_probabilities_hidden_states(
             max_exit = max(max_exit, -transition_matrix[i, i])
         end
         if max_exit * Δt > _CT_HMM_EQUIL_THRESHOLD
-            return _ct_hmm_stationary(transition_matrix)
+            π = _ct_hmm_stationary(transition_matrix)
+            π !== nothing && return π
+            # Non-ergodic Q: limit depends on v, fall through to expv
         end
         return expv(Δt, transpose(transition_matrix), initial_p)
     end
@@ -238,7 +257,9 @@ function _ct_hmm_probabilities_hidden_states(
         max_exit = max(max_exit, -transition_matrix[i, i])
     end
     if max_exit * Δt > _CT_HMM_EQUIL_THRESHOLD
-        return _ct_hmm_stationary(transition_matrix)
+        π = _ct_hmm_stationary(transition_matrix)
+        π !== nothing && return π
+        # Non-ergodic Q: limit depends on v, fall through to expv
     end
 
     return expv(Δt, transpose(transition_matrix), initial_p)
