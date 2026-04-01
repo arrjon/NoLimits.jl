@@ -2,6 +2,7 @@ export ContinuousTimeDiscreteStatesHMM
 
 using Distributions, ExponentialAction, Random, Lux
 import Distributions: pdf, logpdf, rand, mean, var, median, quantile, mode, cdf, support, params
+import ForwardDiff
 
 _ct_hmm_validate_mode(mode::Symbol) =
     mode in (:auto, :expv, :pathsum) ||
@@ -181,10 +182,27 @@ function _ct_hmm_probabilities_pathsum_dag(
     return p ./ sum(p)
 end
 
-# When Δt * max_exit_rate exceeds this threshold, exp(Q Δt) v ≈ stationary distribution
-# to within ~1e-12 for all ergodic Q with up to 10 states.  Empirically validated by
-# sweeping random Q matrices across n ∈ {2,3,4,5,10}: threshold=200 gives max error <3e-15.
+# When spectral_gap(Q) * Δt exceeds this threshold, exp(Q Δt) v ≈ stationary distribution
+# to within ~1e-12 for all ergodic Q.  The spectral gap (smallest |non-zero eigenvalue| of Q)
+# governs convergence; using max_exit_rate was incorrect for Q matrices with disparate rates
+# (e.g. funnel topologies) where the gap can be orders of magnitude smaller than max_exit.
+# For ForwardDiff Dual-number inputs eigvals is unavailable; the shortcut is skipped and
+# expv is used instead.
 const _CT_HMM_EQUIL_THRESHOLD = 200.0
+
+# Strip ForwardDiff Dual to its primal Float64 value (identity for plain floats).
+@inline _ct_hmm_primal(x::AbstractFloat) = x
+@inline _ct_hmm_primal(x::ForwardDiff.Dual) = ForwardDiff.value(x)
+
+# Returns the spectral gap of Q: smallest |non-zero eigenvalue|.
+# Operates on the primal Float64 values so it works for both plain floats and Dual arrays.
+# The gap is a structural property of Q; the Dual (gradient) parts are irrelevant for
+# determining whether the system has reached equilibrium.
+function _ct_hmm_spectral_gap(Q::AbstractMatrix)
+    Q_float = map(_ct_hmm_primal, Q)
+    λs = eigvals(Q_float)
+    return minimum(abs.(λs[abs.(λs) .> sqrt(eps(Float64))]))
+end
 
 # Stationary distribution of Q: null eigenvector of Qᵀ with ∑πᵢ = 1.
 # Solved via the linear system [Qᵀ (last row replaced by 1…1)] π = e_n.
@@ -227,15 +245,18 @@ function _ct_hmm_probabilities_hidden_states(
     _ct_hmm_validate_mode(mode)
 
     if mode == :expv
-        # Equilibrium shortcut: when rates × Δt >> 1, exp(Q Δt) v → stationary dist
-        max_exit = zero(eltype(transition_matrix))
-        for i in 1:size(transition_matrix, 1)
-            max_exit = max(max_exit, -transition_matrix[i, i])
-        end
-        if max_exit * Δt > _CT_HMM_EQUIL_THRESHOLD
-            π = _ct_hmm_stationary(transition_matrix)
-            π !== nothing && return π
-            # Non-ergodic Q: limit depends on v, fall through to expv
+        # Equilibrium shortcut: when spectral_gap(Q) × Δt >> 1, exp(Q Δt) v → stationary.
+        # Gate on max_exit first (free) to avoid the eigvals call in the common case.
+        # For ForwardDiff Dual inputs, _ct_hmm_spectral_gap strips to primal Float64 values;
+        # _ct_hmm_stationary uses A\b which is generic and works for Dual.
+        max_exit = maximum(-_ct_hmm_primal.(diag(transition_matrix)))
+        if max_exit * _ct_hmm_primal(Δt) > _CT_HMM_EQUIL_THRESHOLD
+            gap = _ct_hmm_spectral_gap(transition_matrix)
+            if gap * _ct_hmm_primal(Δt) > _CT_HMM_EQUIL_THRESHOLD
+                π = _ct_hmm_stationary(transition_matrix)
+                π !== nothing && return π
+                # Non-ergodic Q: fall through to expv
+            end
         end
         return expv(Δt, transpose(transition_matrix), initial_p)
     end
@@ -252,14 +273,14 @@ function _ct_hmm_probabilities_hidden_states(
     end
 
     # :auto fell through (cyclic graph) — apply equilibrium shortcut before expv
-    max_exit = zero(eltype(transition_matrix))
-    for i in 1:size(transition_matrix, 1)
-        max_exit = max(max_exit, -transition_matrix[i, i])
-    end
-    if max_exit * Δt > _CT_HMM_EQUIL_THRESHOLD
-        π = _ct_hmm_stationary(transition_matrix)
-        π !== nothing && return π
-        # Non-ergodic Q: limit depends on v, fall through to expv
+    max_exit = maximum(-_ct_hmm_primal.(diag(transition_matrix)))
+    if max_exit * _ct_hmm_primal(Δt) > _CT_HMM_EQUIL_THRESHOLD
+        gap = _ct_hmm_spectral_gap(transition_matrix)
+        if gap * _ct_hmm_primal(Δt) > _CT_HMM_EQUIL_THRESHOLD
+            π = _ct_hmm_stationary(transition_matrix)
+            π !== nothing && return π
+            # Non-ergodic Q: fall through to expv
+        end
     end
 
     return expv(Δt, transpose(transition_matrix), initial_p)
