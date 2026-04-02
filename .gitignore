@@ -16,3 +16,8 @@ examples/
 
 # Claude Code skills (local, not tracked)
 .claude/skills/
+
+# Local-only files (not for repo)
+CLAUDE.md
+agents.md
+benchmarks/
