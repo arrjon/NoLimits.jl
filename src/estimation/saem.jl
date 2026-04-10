@@ -2024,6 +2024,10 @@ function _saem_builtin_updates_from_smoothed_stats(dm::DataModel,
         μ_hat = st.mean
         S2_hat = st.second
         Σ_hat = S2_hat .- μ_hat * μ_hat'
+        if any(!isfinite, Σ_hat)
+            @warn "SAEM closed-form: non-finite covariance estimate for RE :$re; skipping update."
+            continue
+        end
         Σ_hat = 0.5 .* (Σ_hat .+ Σ_hat')
         var_diag = max.(diag(Σ_hat), zero(eltype(Σ_hat)))
         σ_diag = sqrt.(var_diag)
@@ -2535,6 +2539,39 @@ function _fit_model(dm::DataModel, method::SAEM, args...;
     haskey(tkwargs, :progress)  || (tkwargs = merge(tkwargs, (progress=false,)))
     haskey(tkwargs, :verbose)   || (tkwargs = merge(tkwargs, (verbose=false,)))
 
+    # Pre-loop initialization: seed b_current and last_chain_params from prior mean so that
+    # the first MCMC chain (warm_start=true) starts at a valid, finite-likelihood point.
+    let cache_init = ll_cache isa Vector ? ll_cache[1] : ll_cache
+        for bi in 1:length(batch_infos)
+            info = batch_infos[bi]
+            info.n_b == 0 && continue
+            b_init = _re_prior_mean_b(dm, info, θ0_u, const_cache, cache_init, re_names)
+            logf   = _laplace_logf_batch(dm, info, θ0_u, b_init, const_cache, cache_init)
+            if !isfinite(logf)
+                b_init = nothing
+                for _ in 1:10
+                    samp, _ = _is_prior_sample_batch(dm, info, θ0_u, const_cache, cache_init,
+                                                     rng, 1, re_names)
+                    b_cand = samp[:, 1]
+                    if isfinite(_laplace_logf_batch(dm, info, θ0_u, b_cand, const_cache, cache_init))
+                        b_init = b_cand
+                        break
+                    end
+                end
+                if b_init === nothing
+                    error("SAEM: Cannot find valid initial random effects for batch $bi after 10 tries. " *
+                          "Initial fixed-effect parameters likely produce -Inf log-likelihood. " *
+                          "Try different starting values.")
+                end
+            end
+            b_current[bi] .= b_init
+            lp = _b_to_last_params(b_init, info, re_names)
+            for c in 1:effective_n_chains
+                last_chain_params[bi][c] = lp
+            end
+        end
+    end
+
     for iter in 1:method.saem.maxiters
         γ = _saem_gamma_schedule(iter, method.saem)
         sched_phase = _saem_schedule_phase(iter, method.saem)
@@ -2697,6 +2734,7 @@ function _fit_model(dm::DataModel, method::SAEM, args...;
         else
             obj_cache = (θ=Ref{Any}(nothing), obj=Ref{Any}(nothing))
             function obj_only(θt, p)
+                any(isnan, θt) && return eltype(θt)(Inf)
                 θt_free = θt isa ComponentArray ? θt : ComponentArray(θt, axs_free)
                 θt_vec = θt_free
                 use_cache = !(eltype(θt_free) <: ForwardDiff.Dual)
@@ -2781,16 +2819,20 @@ function _fit_model(dm::DataModel, method::SAEM, args...;
                 numeric_mstep_used = true
                 θt_free_before = method.saem.mstep_sa_on_params ? collect(θt_free) : nothing
                 sol = Optimization.solve(prob, method.optimizer; method.optim_kwargs...)
-                θ_hat_t_raw = sol.u
-                θ_hat_t_free = θ_hat_t_raw isa ComponentArray ? θ_hat_t_raw :
-                               ComponentArray(θ_hat_t_raw, axs_free)
-                if method.saem.mstep_sa_on_params
-                    # SA update: θ_new = θ_old + γ*(θ̂ − θ_old)
-                    θt_free = ComponentArray(
-                        θt_free_before .+ γ .* (collect(θ_hat_t_free) .- θt_free_before),
-                        axs_free)
+                if any(!isfinite, sol.u)
+                    @warn "SAEM M-step iter $iter: optimizer returned non-finite parameters; skipping update."
                 else
-                    θt_free = θ_hat_t_free
+                    θ_hat_t_raw = sol.u
+                    θ_hat_t_free = θ_hat_t_raw isa ComponentArray ? θ_hat_t_raw :
+                                   ComponentArray(θ_hat_t_raw, axs_free)
+                    if method.saem.mstep_sa_on_params
+                        # SA update: θ_new = θ_old + γ*(θ̂ − θ_old)
+                        θt_free = ComponentArray(
+                            θt_free_before .+ γ .* (collect(θ_hat_t_free) .- θt_free_before),
+                            axs_free)
+                    else
+                        θt_free = θ_hat_t_free
+                    end
                 end
             end
             θ_prev_new = copy(θt_free)

@@ -1204,7 +1204,7 @@ function _laplace_logf_batch(dm::DataModel,
     for i in batch_info.inds
         η_ind = _build_eta_ind(dm, i, batch_info, b, const_cache, θ_re)
         lli = _loglikelihood_individual(dm, i, θ_re, η_ind, cache)
-        lli == -Inf && return -Inf
+        !isfinite(lli) && return -Inf
         ll += lli
     end
     return ll

@@ -116,7 +116,7 @@ function batch_loglik_ghq(
         for i in batch_info.inds
             η_i = _build_eta_ind(dm, i, batch_info, b_r, const_cache, θ_re)
             lli  = _loglikelihood_individual(dm, i, θ_re, η_i, ll_cache)
-            if lli == -Inf
+            if !isfinite(lli)
                 valid = false
                 break
             end

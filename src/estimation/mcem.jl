@@ -188,7 +188,7 @@ fixed effects.
   rescue multistart settings when an EBE mode has a high gradient norm.
 - `lb`, `ub`: bounds on the transformed fixed-effect scale, or `nothing`.
 """
-struct MCEM{O, K, A, ES, EO, EB, ER, L, U} <: FittingMethod
+struct MCEM{O, K, A, ES, EO, EB, ER, L, U, RC, RM, RV} <: FittingMethod
     optimizer::O
     optim_kwargs::K
     adtype::A
@@ -200,6 +200,9 @@ struct MCEM{O, K, A, ES, EO, EB, ER, L, U} <: FittingMethod
     ub::U
     verbose::Bool
     progress::Bool
+    re_cov_params::RC    # Nothing | NamedTuple – RE → cov parameter mapping
+    re_mean_params::RM   # Nothing | NamedTuple – RE → mean parameter mapping
+    resid_var_param::RV  # Nothing | Symbol | NamedTuple – residual variance target(s)
 end
 
 MCEM(; optimizer=OptimizationOptimJL.LBFGS(linesearch=LineSearches.BackTracking()),
@@ -233,7 +236,10 @@ MCEM(; optimizer=OptimizationOptimJL.LBFGS(linesearch=LineSearches.BackTracking(
      ebe_rescue_grad_tol=ebe_grad_tol,
      ebe_rescue_multistart_sampling=ebe_multistart_sampling,
      lb=nothing,
-     ub=nothing) = begin
+     ub=nothing,
+     re_cov_params=nothing,
+     re_mean_params=nothing,
+     resid_var_param=nothing) = begin
     # When e_step is not provided, build MCEM_MCMC from legacy kwargs (backward compat)
     e_step_actual = if e_step === nothing
         MCEM_MCMC(sampler, turing_kwargs, sample_schedule, warm_start)
@@ -248,7 +254,7 @@ MCEM(; optimizer=OptimizationOptimJL.LBFGS(linesearch=LineSearches.BackTracking(
                                    ebe_rescue_multistart_k, ebe_rescue_max_rounds,
                                    ebe_rescue_grad_tol, ebe_rescue_multistart_sampling)
     MCEM(optimizer, optim_kwargs, adtype, e_step_actual, em, ebe, ebe_rescue,
-         lb, ub, verbose, progress)
+         lb, ub, verbose, progress, re_cov_params, re_mean_params, resid_var_param)
 end
 
 """
@@ -265,6 +271,14 @@ struct MCEMResult{S, O, I, R, N, B} <: MethodResult
     raw::R
     notes::N
     eb_modes::B
+end
+
+function get_closed_form_mstep_used(res::MCEMResult)
+    notes = res.notes
+    if notes isa NamedTuple && hasproperty(notes, :closed_form_mstep_used)
+        return notes.closed_form_mstep_used
+    end
+    return false
 end
 
 mutable struct _MCEMDiagnostics{T}
@@ -416,7 +430,7 @@ function _build_mcem_batch_model(re_names::Vector{Symbol})
             for i in info.inds
                 η_ind = _build_eta_ind(dm, i, info, b, const_cache, θ)
                 lli = _loglikelihood_individual(dm, i, θ, η_ind, cache)
-                if lli == -Inf
+                if !isfinite(lli)
                     ll = -Inf
                     break
                 end
@@ -687,6 +701,87 @@ function _is_prior_sample_batch(dm::DataModel,
         log_qs[m] = lq
     end
     return (samples, log_qs)
+end
+
+# Build a b vector at the prior mean (or median fallback) for each RE level in a batch.
+# Used to initialize b_current and Turing's starting state before the main SAEM/MCEM loop.
+function _re_prior_mean_b(dm::DataModel,
+                          info::_LaplaceBatchInfo,
+                          θ::ComponentArray,
+                          const_cache::LaplaceConstantsCache,
+                          cache::_LLCache,
+                          re_names::Vector{Symbol})
+    nb = info.n_b
+    b  = zeros(Float64, nb)
+    nb == 0 && return b
+    dists_by_re = _re_dists_for_info(dm, info, θ, cache)
+    for (ri, re) in enumerate(re_names)
+        meta   = info.re_info[ri]
+        levels = meta.map.levels
+        isempty(levels) && continue
+        dists  = getproperty(dists_by_re, re)
+        for (li, _) in enumerate(levels)
+            r    = meta.ranges[li]
+            dist = dists[li]
+            # Try mean, then median — both are generic Distributions.jl API
+            val = try
+                m = Distributions.mean(dist)
+                all(isfinite, m isa Number ? (m,) : m) ? m : nothing
+            catch
+                nothing
+            end
+            if val === nothing
+                val = try
+                    m = Distributions.median(dist)
+                    all(isfinite, m isa Number ? (m,) : m) ? m : nothing
+                catch
+                    nothing
+                end
+            end
+            val === nothing && continue   # leave b at 0 for this level
+            if meta.is_scalar
+                b[first(r)] = val isa Number ? Float64(val) : Float64(val[1])
+            else
+                v = val isa AbstractVector ? val : [val]
+                for k in eachindex(r)
+                    k > length(v) && break
+                    b[r[k]] = Float64(v[k])
+                end
+            end
+        end
+    end
+    return b
+end
+
+# Convert a flat b vector to the NamedTuple format expected by Turing as `initial_params`.
+# Key names match those produced by `_extract_b_samples`: level 1 → `η_v1` (or `η_v1[k]`
+# for vectors), level li>1 → `η_vals[li]` (or `η_vals[li][k]` for vectors).
+function _b_to_last_params(b::AbstractVector,
+                            info::_LaplaceBatchInfo,
+                            re_names::Vector{Symbol})
+    pairs = Pair{Symbol, Float64}[]
+    for (ri, re) in enumerate(re_names)
+        meta   = info.re_info[ri]
+        levels = meta.map.levels
+        for (li, _) in enumerate(levels)
+            r = meta.ranges[li]
+            if meta.is_scalar
+                key = li == 1 ? Symbol(re, :_v1) : Symbol(string(re, "_vals[", li, "]"))
+                push!(pairs, key => Float64(b[first(r)]))
+            else
+                for k in eachindex(r)
+                    key = li == 1 ?
+                        Symbol(string(re, "_v1[", k, "]")) :
+                        Symbol(string(re, "_vals[", li, "][", k, "]"))
+                    push!(pairs, key => Float64(b[r[k]]))
+                end
+            end
+        end
+    end
+    isempty(pairs) && return NamedTuple()
+    ks = Tuple(first.(pairs))
+    vs = Tuple(last.(pairs))
+    return NamedTuple{ks}(vs)
 end
 
 # Draw n_samples from the adaptive Gaussian proposal in bijected z-space.
@@ -996,6 +1091,144 @@ function _mcem_Q(dm::DataModel,
 end
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Closed-form sufficient statistics from MCEM samples
+#
+# Collects weighted sample moments from the E-step samples (one matrix per
+# batch).  For MCMC the weights are uniform (1/M); for IS the caller passes
+# the normalised importance weights.
+# ─────────────────────────────────────────────────────────────────────────────
+function _mcem_collect_stats_from_samples(
+        dm::DataModel,
+        batch_infos::Vector{_LaplaceBatchInfo},
+        samples_by_batch::AbstractVector{<:AbstractMatrix},
+        weights_by_batch,                    # nothing (MCMC) or Vector{Vector{Float64}} (IS)
+        θu::ComponentArray,
+        const_cache::LaplaceConstantsCache,
+        resid_var_param,
+        re_cov_params::NamedTuple,
+        re_mean_params::NamedTuple,
+        re_family_map_local::NamedTuple,
+        ll_cache)
+
+    Tθ = promote_type(eltype(θu), Float64)
+    cache_re = dm.re_group_info.laplace_cache
+    re_names_all = cache_re.re_names
+
+    # ── RE statistics block ──────────────────────────────────────────────────
+    re_pairs = Pair{Symbol, Any}[]
+    for re in _saem_builtin_re_targets(re_cov_params, re_mean_params)
+        ri = findfirst(==(re), re_names_all)
+        ri === nothing && continue
+        family = hasproperty(re_family_map_local, re) ? getproperty(re_family_map_local, re) : :normal
+
+        sum_wx  = nothing
+        sum_wxx = nothing
+        n_levels = 0
+
+        for (bi, info) in enumerate(batch_infos)
+            smat = samples_by_batch[bi]
+            M_samp = size(smat, 2)
+            M_samp == 0 && continue
+            rei = info.re_info[ri]
+
+            for lvl_id in rei.map.levels
+                for m in 1:M_samp
+                    b_col = view(smat, :, m)
+                    v = _re_value_from_b(rei, lvl_id, b_col)
+                    v === nothing && continue
+
+                    w_m = weights_by_batch === nothing ? 1.0 / M_samp :
+                                                         Float64(weights_by_batch[bi][m])
+
+                    raw = v isa Number ? Tθ[v] : Tθ.(collect(v))
+                    all(isfinite, raw) || continue
+                    x = if family == :lognormal
+                        all(raw .> zero(Tθ)) || continue
+                        log.(raw)
+                    elseif family == :normal || family == :mvnormal || family == :exponential
+                        raw
+                    else
+                        continue
+                    end
+
+                    if sum_wx === nothing
+                        dim = length(x)
+                        sum_wx  = zeros(Tθ, dim)
+                        sum_wxx = zeros(Tθ, dim, dim)
+                    end
+                    sum_wx  .+= w_m .* x
+                    sum_wxx .+= w_m .* (x * x')
+                end
+                n_levels += 1
+            end
+        end
+
+        (n_levels == 0 || sum_wx === nothing) && continue
+        mean_x   = sum_wx  ./ n_levels
+        second_x = sum_wxx ./ n_levels
+        push!(re_pairs, re => (family=family, mean=mean_x, second=second_x, n=n_levels))
+    end
+    re_stats = NamedTuple(re_pairs)
+
+    # ── Outcome statistics block ─────────────────────────────────────────────
+    obs_targets = _saem_outcome_targets(dm.config.obs_cols, resid_var_param)
+    outcome_pairs = Pair{Symbol, Any}[]
+    if !isempty(keys(obs_targets))
+        obs_acc  = Dict{Symbol, Any}()
+        all_supported = true
+        for (bi, info) in enumerate(batch_infos)
+            smat = samples_by_batch[bi]
+            M_samp = size(smat, 2)
+            M_samp == 0 && continue
+            for i in info.inds
+                for m in 1:M_samp
+                    b_col = view(smat, :, m)
+                    w_m = weights_by_batch === nothing ? 1.0 / M_samp :
+                                                         Float64(weights_by_batch[bi][m])
+                    η_ind = _build_eta_ind(dm, i, info, b_col, const_cache, θu)
+                    ll_use = ll_cache isa Vector ? ll_cache[1] : ll_cache
+                    stats_i, ok = _saem_collect_outcome_stats_individual(
+                        dm, i, θu, η_ind, ll_use, obs_targets)
+                    if !ok
+                        all_supported = false
+                        break
+                    end
+                    for (col, st) in Base.pairs(stats_i)
+                        # Weight the per-individual stat by w_m before accumulating
+                        weighted_st = (family=st.family,
+                                       s1=w_m * st.s1,
+                                       s2=w_m * st.s2,
+                                       ss=w_m * st.ss,
+                                       n=w_m * Float64(st.n))
+                        prev = get(obs_acc, col, nothing)
+                        if prev === nothing
+                            obs_acc[col] = weighted_st
+                        else
+                            merged = _saem_merge_outcome_stats(prev, weighted_st)
+                            if merged === nothing
+                                all_supported = false
+                                break
+                            end
+                            obs_acc[col] = merged
+                        end
+                    end
+                    all_supported || break
+                end
+                all_supported || break
+            end
+            all_supported || break
+        end
+        if all_supported
+            for col in dm.config.obs_cols
+                haskey(obs_acc, col) && push!(outcome_pairs, col => obs_acc[col])
+            end
+        end
+    end
+
+    return (re=re_stats, outcome=NamedTuple(outcome_pairs), hmm=NamedTuple())
+end
+
 function _fit_model(dm::DataModel, method::MCEM, args...;
                     constants::NamedTuple=NamedTuple(),
                     constants_re::NamedTuple=NamedTuple(),
@@ -1076,6 +1309,36 @@ function _fit_model(dm::DataModel, method::MCEM, args...;
     fill!(last_params, nothing)
     batch_rngs = _mcem_thread_rngs(rng, length(batch_infos))
 
+    # Pre-loop initialization: seed last_params from prior mean so that the first MCMC chain
+    # (when warm_start=true) starts at a valid, finite-likelihood point — analogous to saemix's
+    # initialization filter, but checking the full joint density via _laplace_logf_batch.
+    let cache_init = ll_cache isa Vector ? ll_cache[1] : ll_cache
+        for bi in 1:length(batch_infos)
+            info = batch_infos[bi]
+            info.n_b == 0 && continue
+            b_init = _re_prior_mean_b(dm, info, θ0_u, const_cache, cache_init, re_names)
+            logf   = _laplace_logf_batch(dm, info, θ0_u, b_init, const_cache, cache_init)
+            if !isfinite(logf)
+                b_init = nothing
+                for _ in 1:10
+                    samp, _ = _is_prior_sample_batch(dm, info, θ0_u, const_cache, cache_init,
+                                                     rng, 1, re_names)
+                    b_cand = samp[:, 1]
+                    if isfinite(_laplace_logf_batch(dm, info, θ0_u, b_cand, const_cache, cache_init))
+                        b_init = b_cand
+                        break
+                    end
+                end
+                if b_init === nothing
+                    error("MCEM: Cannot find valid initial random effects for batch $bi after 10 tries. " *
+                          "Initial fixed-effect parameters likely produce -Inf log-likelihood. " *
+                          "Try different starting values.")
+                end
+            end
+            last_params[bi] = _b_to_last_params(b_init, info, re_names)
+        end
+    end
+
     # IS proposal blocks — one Vector{_REAdaptBlock} per batch (only for MCEM_IS)
     re_types = get_re_types(dm.model.random.random)
     ll_cache_single = ll_cache isa Vector ? ll_cache[1] : ll_cache
@@ -1086,8 +1349,29 @@ function _fit_model(dm::DataModel, method::MCEM, args...;
         nothing
     end
 
+    # ── Closed-form M-step setup ─────────────────────────────────────────────
+    auto_cf = _autodetect_gaussian_re(dm, fixed_names)
+    rc = method.re_cov_params !== nothing ? method.re_cov_params :
+         (auto_cf !== nothing ? auto_cf.re_cov_params : NamedTuple())
+    rm = method.re_mean_params !== nothing ? method.re_mean_params :
+         (auto_cf !== nothing ? auto_cf.re_mean_params : NamedTuple())
+    rv = method.resid_var_param !== nothing ? method.resid_var_param :
+         (auto_cf !== nothing ? auto_cf.resid_var_param : nothing)
+
+    re_family_map_cf = _re_family_map(dm)
+    cf_elig = _builtin_closed_form_eligibility(dm, rc, rm, rv)
+    builtin_cf_mode = cf_elig.has_any_closed_form_block ? :closed_form : :none
+
+    if builtin_cf_mode == :closed_form
+        _log_closed_form_plan("MCEM", cf_elig, rc, rm, rv, false, free_names)
+    end
+
+    closed_form_builtin_used = false
+    optimizer_ever_called    = false
+
     θ_prev = copy(θt_free)
     Q_prev = T0(Inf)
+    θu_last = θ0_u   # tracks the full untransformed params at the end of each iteration
     param_streak = 0
     q_streak = 0
     converged = false
@@ -1193,97 +1477,135 @@ function _fit_model(dm::DataModel, method::MCEM, args...;
             S_diag = is_es.n_samples
         end
 
-        obj_cache = (θ=Ref{Any}(nothing), obj=Ref{Any}(nothing))
-        function obj_only(θt, p)
-            if any(isnan.(θt))
-                return Inf
+        # ── Closed-form M-step updates ───────────────────────────────────────
+        iter_constants = constants
+        if builtin_cf_mode == :closed_form
+            curr_stats = _mcem_collect_stats_from_samples(
+                dm, batch_infos, samples_by_batch, weights_by_batch,
+                θu_curr, const_cache, rv, rc, rm, re_family_map_cf, ll_cache)
+            updates = _builtin_updates_from_stats(dm,
+                ComponentArray(θu_curr, getaxes(θu_curr)),
+                curr_stats, rv, NamedTuple(), rc, rm)
+            if !isempty(updates)
+                closed_form_builtin_used = true
+                iter_constants = merge(iter_constants, updates)
             end
-
-            θt_free_loc = θt isa ComponentArray ? θt : ComponentArray(θt, axs_free)
-            θt_vec = θt_free_loc
-            use_cache = !(eltype(θt_free_loc) <: ForwardDiff.Dual)
-            if use_cache && obj_cache.θ[] !== nothing && length(obj_cache.θ[]) == length(θt_vec)
-                maxdiff = _maxabsdiff(θt_vec, obj_cache.θ[])
-                if maxdiff == 0.0
-                    return obj_cache.obj[]
-                end
-            end
-            T = eltype(θt_free_loc)
-            θt_full_loc = ComponentArray(T.(θ_const_t), axs_full)
-
-            for name in free_names
-                setproperty!(θt_full_loc, name, getproperty(θt_free_loc, name))
-            end
-
-            θu = inv_transform(θt_full_loc)
-
-            Q = _mcem_Q(dm, batch_infos, θu, const_cache, ll_cache, samples_by_batch,
-                        weights_by_batch; serialization=serialization, q_cache=q_cache)
-
-            !isfinite(Q) && return Inf
-            obj = -Q + _penalty_value(θu, penalty)
-            !isfinite(obj) && return Inf
-            if use_cache
-                obj_cache.θ[] = copy(θt_vec)
-                obj_cache.obj[] = obj
-            end
-
-            return obj
         end
+        iter_constants = _clamp_constants_to_bounds(iter_constants, fe)
 
+        # Rebuild iteration-specific free names and axes
+        free_names_iter = [n for n in fixed_names if !(n in keys(iter_constants))]
+        θ_const_u_iter = deepcopy(θ0_u)
+        _apply_constants!(θ_const_u_iter, iter_constants)
+        θ_const_t_iter = transform(θ_const_u_iter)
+        axs_full_iter   = getaxes(θ_const_t_iter)
 
-        optf = OptimizationFunction(obj_only, method.adtype)
-        lower_t, upper_t = get_bounds_transformed(fe)
+        θu_new = nothing
+        Q_new  = T0(Inf)
 
-        lower_t_free = ComponentArray(NamedTuple{Tuple(free_names)}(Tuple(getproperty(lower_t, n) for n in free_names)))
-        upper_t_free = ComponentArray(NamedTuple{Tuple(free_names)}(Tuple(getproperty(upper_t, n) for n in free_names)))
-        lower_t_free_vec = collect(lower_t_free)
-        upper_t_free_vec = collect(upper_t_free)
-        use_bounds = !(all(isinf, lower_t_free_vec) && all(isinf, upper_t_free_vec))
-        user_bounds = method.lb !== nothing || method.ub !== nothing
-        if user_bounds && !isempty(keys(constants))
-            @info "Bounds for constant parameters are ignored." constants=collect(keys(constants))
-        end
-        if user_bounds
-            lb_m = method.lb
-            ub_m = method.ub
-            if lb_m isa ComponentArray
-                lb_m = ComponentArray(NamedTuple{Tuple(free_names)}(Tuple(getproperty(lb_m, n) for n in free_names)))
-            end
-            if ub_m isa ComponentArray
-                ub_m = ComponentArray(NamedTuple{Tuple(free_names)}(Tuple(getproperty(ub_m, n) for n in free_names)))
-            end
-            lb_m = lb_m === nothing ? lower_t_free_vec : collect(lb_m)
-            ub_m = ub_m === nothing ? upper_t_free_vec : collect(ub_m)
+        if isempty(free_names_iter)
+            # All parameters handled by closed-form; skip optimizer
+            θt_full_new = ComponentArray(T0.(θ_const_t_iter), axs_full_iter)
+            θu_new = inv_transform(θt_full_new)
+            Q_new = _mcem_Q(dm, batch_infos, θu_new, const_cache, ll_cache, samples_by_batch,
+                            weights_by_batch; serialization=serialization, q_cache=q_cache)
+            Q_new = Q_new == Inf ? T0(Inf) : Q_new
         else
-            lb_m = lower_t_free_vec
-            ub_m = upper_t_free_vec
+            optimizer_ever_called = true
+            # Optimizer path with iteration-specific free set
+            θt_free_iter = ComponentArray(NamedTuple{Tuple(free_names_iter)}(
+                Tuple(getproperty(θt_full_curr, n) for n in free_names_iter)))
+            axs_free_iter = getaxes(θt_free_iter)
+
+            obj_cache = (θ=Ref{Any}(nothing), obj=Ref{Any}(nothing))
+            function obj_only(θt, p)
+                any(isnan.(θt)) && return Inf
+                θt_free_loc = θt isa ComponentArray ? θt : ComponentArray(θt, axs_free_iter)
+                θt_vec = θt_free_loc
+                use_cache = !(eltype(θt_free_loc) <: ForwardDiff.Dual)
+                if use_cache && obj_cache.θ[] !== nothing && length(obj_cache.θ[]) == length(θt_vec)
+                    _maxabsdiff(θt_vec, obj_cache.θ[]) == 0.0 && return obj_cache.obj[]
+                end
+                T = eltype(θt_free_loc)
+                θt_full_loc = ComponentArray(T.(θ_const_t_iter), axs_full_iter)
+                for name in free_names_iter
+                    setproperty!(θt_full_loc, name, getproperty(θt_free_loc, name))
+                end
+                θu = inv_transform(θt_full_loc)
+                Q = _mcem_Q(dm, batch_infos, θu, const_cache, ll_cache, samples_by_batch,
+                            weights_by_batch; serialization=serialization, q_cache=q_cache)
+                !isfinite(Q) && return Inf
+                obj = -Q + _penalty_value(θu, penalty)
+                !isfinite(obj) && return Inf
+                if use_cache
+                    obj_cache.θ[] = copy(θt_vec)
+                    obj_cache.obj[] = obj
+                end
+                return obj
+            end
+
+            optf = OptimizationFunction(obj_only, method.adtype)
+            lower_t, upper_t = get_bounds_transformed(fe)
+
+            lower_t_free_iter = ComponentArray(NamedTuple{Tuple(free_names_iter)}(Tuple(getproperty(lower_t, n) for n in free_names_iter)))
+            upper_t_free_iter = ComponentArray(NamedTuple{Tuple(free_names_iter)}(Tuple(getproperty(upper_t, n) for n in free_names_iter)))
+            lower_t_free_vec = collect(lower_t_free_iter)
+            upper_t_free_vec = collect(upper_t_free_iter)
+            use_bounds = !(all(isinf, lower_t_free_vec) && all(isinf, upper_t_free_vec))
+            user_bounds = method.lb !== nothing || method.ub !== nothing
+            if user_bounds && !isempty(keys(constants))
+                @info "Bounds for constant parameters are ignored." constants=collect(keys(constants))
+            end
+            if user_bounds
+                lb_m = method.lb
+                ub_m = method.ub
+                if lb_m isa ComponentArray
+                    lb_m = ComponentArray(NamedTuple{Tuple(free_names_iter)}(Tuple(getproperty(lb_m, n) for n in free_names_iter)))
+                end
+                if ub_m isa ComponentArray
+                    ub_m = ComponentArray(NamedTuple{Tuple(free_names_iter)}(Tuple(getproperty(ub_m, n) for n in free_names_iter)))
+                end
+                lb_m = lb_m === nothing ? lower_t_free_vec : collect(lb_m)
+                ub_m = ub_m === nothing ? upper_t_free_vec : collect(ub_m)
+            else
+                lb_m = lower_t_free_vec
+                ub_m = upper_t_free_vec
+            end
+            use_bounds = use_bounds || user_bounds
+            if parentmodule(typeof(method.optimizer)) === OptimizationBBO && !use_bounds
+                error("BlackBoxOptim methods require finite bounds. Add lower/upper bounds in @fixedEffects (on transformed scale) or pass them via MCEM(lb=..., ub=...). A quick helper is default_bounds_from_start(dm; margin=...).")
+            end
+            θ0_init = collect(θt_free_iter)
+            prob = use_bounds ? OptimizationProblem(optf, θ0_init; lb=lb_m, ub=ub_m) :
+                                OptimizationProblem(optf, θ0_init)
+
+            sol = Optimization.solve(prob, method.optimizer; method.optim_kwargs...)
+
+            if any(!isfinite, sol.u)
+                @warn "MCEM M-step iter $iter: optimizer returned non-finite parameters; skipping update."
+                θu_new = θu_curr
+                Q_new  = Q_prev
+            else
+                θ_hat_t_raw  = sol.u
+                θ_hat_t_free = θ_hat_t_raw isa ComponentArray ? θ_hat_t_raw :
+                                ComponentArray(θ_hat_t_raw, axs_free_iter)
+
+                θt_full_new = ComponentArray(eltype(θ_hat_t_free).(θ_const_t_iter), axs_full_iter)
+                for name in free_names_iter
+                    setproperty!(θt_full_new, name, getproperty(θ_hat_t_free, name))
+                end
+                θu_new = inv_transform(θt_full_new)
+                Q_new = _mcem_Q(dm, batch_infos, θu_new, const_cache, ll_cache, samples_by_batch,
+                                weights_by_batch; serialization=serialization, q_cache=q_cache)
+                Q_new = Q_new == Inf ? T0(Inf) : Q_new
+            end
         end
-        use_bounds = use_bounds || user_bounds
-        if parentmodule(typeof(method.optimizer)) === OptimizationBBO && !use_bounds
-            error("BlackBoxOptim methods require finite bounds. Add lower/upper bounds in @fixedEffects (on transformed scale) or pass them via MCEM(lb=..., ub=...). A quick helper is default_bounds_from_start(dm; margin=...).")
-        end
-        θ0_init = collect(θt_free)
-        prob = use_bounds ? OptimizationProblem(optf, θ0_init; lb=lb_m, ub=ub_m) :
-                            OptimizationProblem(optf, θ0_init)
 
-
-        sol = Optimization.solve(prob, method.optimizer; method.optim_kwargs...)
-
-        θ_hat_t_raw = sol.u
-        θ_hat_t_free = θ_hat_t_raw isa ComponentArray ? θ_hat_t_raw :
-                        ComponentArray(θ_hat_t_raw, axs_free)
-        θt_free = θ_hat_t_free
+        # Update θt_free to reflect full current state (use full axes for tracking)
+        θt_full_new_full = transform(θu_new)
+        θt_free = ComponentArray(NamedTuple{Tuple(free_names)}(
+            Tuple(getproperty(θt_full_new_full, n) for n in free_names)))
         θ_prev_new = copy(θt_free)
-
-        θt_full = ComponentArray(eltype(θt_free).(θ_const_t), axs_full)
-        for name in free_names
-            setproperty!(θt_full, name, getproperty(θt_free, name))
-        end
-        θu_new = inv_transform(θt_full)
-        Q_new = _mcem_Q(dm, batch_infos, θu_new, const_cache, ll_cache, samples_by_batch,
-                        weights_by_batch; serialization=serialization, q_cache=q_cache)
-        Q_new = Q_new == Inf ? T0(Inf) : Q_new
 
         dθ_abs = _maxabsdiff(θ_prev_new, θ_prev)
         dθ_rel = dθ_abs / max(T0(1.0), _maxabs(θ_prev))
@@ -1306,6 +1628,7 @@ function _fit_model(dm::DataModel, method::MCEM, args...;
 
         θ_prev = θ_prev_new
         Q_prev = Q_new
+        θu_last = θu_new
 
         if dθ_abs <= method.em.atol_theta && dθ_rel <= method.em.rtol_theta
             param_streak += 1
@@ -1326,24 +1649,33 @@ function _fit_model(dm::DataModel, method::MCEM, args...;
     end
     ProgressMeter.finish!(progress_bar)
 
-    θ_hat_t_free = θ_prev isa ComponentArray ? θ_prev : ComponentArray(θ_prev, axs_free)
-    θ_hat_t = ComponentArray(eltype(θ_hat_t_free).(θ_const_t), axs_full)
-    for name in free_names
-        setproperty!(θ_hat_t, name, getproperty(θ_hat_t_free, name))
-    end
-    θ_hat_u = inv_transform(θ_hat_t)
+    # Reconstruct final parameter estimates from the last full θu
+    θ_hat_u = θu_last
+    θ_hat_t = transform(θ_hat_u)
 
     summary = FitSummary(Q_prev, converged,
                          FitParameters(θ_hat_t, θ_hat_u),
                          NamedTuple())
     diagnostics = FitDiagnostics((;), (optimizer=method.optimizer,),
-                                 (em_iters=length(diag.Q_hist), dθ_abs=diag.dθ_abs[end],
-                                  dQ_abs=diag.dQ_abs[end]),
+                                 (em_iters=length(diag.Q_hist),
+                                  dθ_abs=isempty(diag.dθ_abs) ? T0(NaN) : diag.dθ_abs[end],
+                                  dQ_abs=isempty(diag.dQ_abs) ? T0(NaN) : diag.dQ_abs[end]),
                                  NamedTuple())
     eb_modes = store_eb_modes ? _compute_bstars(dm, θ_hat_u, constants_re, ll_cache, method.ebe, rng;
                                                 rescue=method.ebe_rescue,
                                                 progress=method.progress,
                                                 progress_desc="MCEM Final EBE")[1] : nothing
-    result = MCEMResult(nothing, Q_prev, length(diag.Q_hist), nothing, (diagnostics=diag,), eb_modes)
+
+    cf_mode = if closed_form_builtin_used
+        optimizer_ever_called ? :hybrid : :closed_form_only
+    else
+        :none
+    end
+    notes = (diagnostics=diag,
+             closed_form_mstep_used=closed_form_builtin_used,
+             closed_form_mstep_mode=cf_mode,
+             closed_form_builtin_eligibility=cf_elig)
+
+    result = MCEMResult(nothing, Q_prev, length(diag.Q_hist), nothing, notes, eb_modes)
     return FitResult(method, result, summary, diagnostics, store_data_model ? dm : nothing, args, fit_kwargs)
 end

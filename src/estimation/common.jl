@@ -1449,7 +1449,7 @@ function loglikelihood(dm::DataModel, θ::ComponentArray, η;
             tid = Threads.threadid()
             η_ind = η isa Vector ? η[i] : η
             lli = _loglikelihood_individual(dm, i, θ, η_ind, caches[tid])
-            if lli == -Inf
+            if !isfinite(lli)
                 bad[] = true
             else
                 by_individual[i] = lli
@@ -1466,7 +1466,7 @@ function loglikelihood(dm::DataModel, θ::ComponentArray, η;
         for i in 1:n
             η_ind = η isa Vector ? η[i] : η
             lli = _loglikelihood_individual(dm, i, θ, η_ind, cache)
-            lli == -Inf && return -Inf
+            !isfinite(lli) && return -Inf
             ll += lli
         end
         return ll
@@ -1490,4 +1490,69 @@ function _symmetrize_psd_params(θ::ComponentArray, fe::FixedEffects)
         end
     end
     return θsym
+end
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared closed-form M-step helpers (SAEM and MCEM).
+#
+# The canonical implementations live in saem.jl (_saem_* names) and are
+# resolved at call-time (after the full module is loaded).  These thin
+# wrappers give MCEM a stable, non-SAEM-prefixed API to call.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@inline _autodetect_gaussian_re(dm::DataModel, fixed_names) =
+    _saem_autodetect_gaussian_re(dm, fixed_names)
+
+@inline _re_family_map(dm::DataModel) = _saem_re_family_map(dm)
+
+@inline _builtin_re_targets(re_cov_params::NamedTuple, re_mean_params::NamedTuple) =
+    _saem_builtin_re_targets(re_cov_params, re_mean_params)
+
+@inline _outcome_targets(obs_cols, resid_var_param) =
+    _saem_outcome_targets(obs_cols, resid_var_param)
+
+@inline _builtin_closed_form_eligibility(dm::DataModel,
+                                          re_cov_params::NamedTuple,
+                                          re_mean_params::NamedTuple,
+                                          resid_var_param,
+                                          hmm_emission_params::NamedTuple=NamedTuple()) =
+    _saem_builtin_closed_form_eligibility(dm, re_cov_params, re_mean_params,
+                                          resid_var_param, hmm_emission_params)
+
+@inline _builtin_updates_from_stats(dm::DataModel,
+                                     θ::ComponentArray,
+                                     stats,
+                                     resid_var_param,
+                                     hmm_emission_params::NamedTuple,
+                                     re_cov_params::NamedTuple,
+                                     re_mean_params::NamedTuple) =
+    _saem_builtin_updates_from_smoothed_stats(dm, θ, stats, resid_var_param,
+                                               hmm_emission_params,
+                                               re_cov_params, re_mean_params)
+
+@inline _clamp_constants_to_bounds(constants::NamedTuple, fe::FixedEffects) =
+    _saem_clamp_constants_to_bounds(constants, fe)
+
+function _log_closed_form_plan(method_name::String,
+                                elig,
+                                re_cov_params::NamedTuple,
+                                re_mean_params::NamedTuple,
+                                resid_var_param,
+                                has_custom_closed_form::Bool,
+                                base_free_names::Vector{Symbol})
+    cf_syms = Symbol[]
+    for v in values(re_cov_params);     _saem_collect_target_symbols!(cf_syms, v); end
+    for v in values(re_mean_params);    _saem_collect_target_symbols!(cf_syms, v); end
+    _saem_collect_target_symbols!(cf_syms, resid_var_param)
+    cf_set = Set(cf_syms)
+    if has_custom_closed_form
+        union!(cf_set, base_free_names)
+    end
+    numeric_params = [n for n in base_free_names if !(n in cf_set)]
+    if isempty(numeric_params)
+        @info "$(method_name): all parameters handled by closed-form M-step; numeric optimizer inactive."
+    else
+        @info "$(method_name): closed-form M-step active. Numerically optimized parameters: $(numeric_params)"
+    end
+    return nothing
 end

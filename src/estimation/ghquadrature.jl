@@ -153,7 +153,7 @@ function _ghq_batch_ll(dm::DataModel,
         for i in info.inds
             η_i = _build_eta_ind(dm, i, info, empty_b, const_cache, θu_re)
             lli = _loglikelihood_individual(dm, i, θu_re, η_i, ll_cache)
-            lli == -Inf && return T(-Inf)
+            !isfinite(lli) && return T(-Inf)
             total += T(lli)
         end
         return total
