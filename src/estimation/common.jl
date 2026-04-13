@@ -27,6 +27,7 @@ export get_vi_trace
 export get_vi_state
 export sample_posterior
 export get_loglikelihood
+export get_loglikelihood_quadrature
 export get_laplace_random_effects
 export get_re_covariate_usage
 export loglikelihood
@@ -802,6 +803,142 @@ function get_loglikelihood(res::FitResult;
     dm = res.data_model
     dm === nothing && error("This fit result does not store a DataModel; call get_loglikelihood(dm, res) instead.")
     return get_loglikelihood(dm, res; constants_re=constants_re, ode_args=ode_args, ode_kwargs=ode_kwargs, serialization=serialization)
+end
+
+function _default_ebe_options()
+    EBEOptions(
+        OptimizationOptimJL.LBFGS(linesearch=LineSearches.BackTracking(maxstep=1.0)),
+        NamedTuple(),
+        Optimization.AutoForwardDiff(),
+        :auto,
+        50,
+        10,
+        1,
+        :lhs,
+    )
+end
+
+"""
+    get_loglikelihood_quadrature(dm, res; level=3, constants_re, ode_args, ode_kwargs,
+                                  serialization, ebe_options, rng, jitter) -> Float64
+
+Compute the marginal log-likelihood using **Adaptive Gauss-Hermite Quadrature** (AGHQ).
+
+Unlike `get_loglikelihood`, which plugs in the EBE point estimate for Laplace/FOCEI/SAEM/MCEM
+methods, this function integrates over each batch's random effects using sparse-grid
+quadrature centred at the EBE mode with the local posterior curvature for scaling.
+
+The integration measure for each batch is
+
+    b = b* + S * z,  z ~ N(0, I)
+
+where **b*** is the empirical-Bayes mode and **S = chol(-H)^{-1}** is derived from
+the Hessian H of log p(b | y, θ) at b*. The log-correction
+
+    logcorrection(z) = log p(b* + Sz | θ) + log|det(S)| + ½‖z‖² + ½d·log(2π)
+
+accounts for the prior, Jacobian, and Gaussian quadrature measure.
+
+# Supported methods
+Laplace, LaplaceMAP, FOCEI, FOCEIMAP, SAEM, MCEM, GHQuadrature, GHQuadratureMAP.
+
+# Not supported
+- **MCMC**: raises an error.
+- **MLE/MAP**: raises an error directing the user to `get_loglikelihood`, which already
+  returns the exact marginal log-likelihood for these methods (no random effects).
+
+# Keyword Arguments
+- `level`: Smolyak accuracy level (default 3). Same as in `GHQuadrature`.
+- `constants_re`: fixes specific RE levels on the natural scale.
+- `ode_args`, `ode_kwargs`: forwarded to the ODE solver.
+- `serialization`: `EnsembleSerial()` (default) or `EnsembleThreads()`.
+- `ebe_options::Union{Nothing, EBEOptions}`: EBE optimizer options used when stored
+  modes are unavailable. `nothing` uses the same defaults as `Laplace()`.
+- `rng`: random number generator for EBE multistart (if needed).
+- `jitter`: initial jitter for Cholesky of negative Hessian (default 1e-6).
+"""
+function get_loglikelihood_quadrature(dm::DataModel,
+                                       res::FitResult;
+                                       level::Union{Int, NamedTuple}=3,
+                                       constants_re::NamedTuple=NamedTuple(),
+                                       ode_args::Tuple=(),
+                                       ode_kwargs::NamedTuple=NamedTuple(),
+                                       serialization::SciMLBase.EnsembleAlgorithm=EnsembleSerial(),
+                                       ebe_options::Union{Nothing, EBEOptions}=nothing,
+                                       rng::AbstractRNG=Random.default_rng(),
+                                       jitter::Float64=1e-6)
+    if res.result isa MCMCResult
+        error("get_loglikelihood_quadrature: MCMC results are not supported.")
+    end
+    if res.result isa MLEResult || res.result isa MAPResult
+        error("get_loglikelihood_quadrature: MLE/MAP models have no random effects. " *
+              "Use get_loglikelihood instead, which already returns the exact marginal log-likelihood.")
+    end
+
+    constants_re = _res_constants_re(res, constants_re)
+    θu = get_params(res; scale=:untransformed)
+    θu_re = _symmetrize_psd_params(θu, dm.model.fixed.fixed)
+
+    _, batch_infos, const_cache = _build_laplace_batch_infos(dm, constants_re)
+    ll_cache = build_ll_cache(dm; ode_args=ode_args, ode_kwargs=ode_kwargs, force_saveat=true)
+
+    # Resolve EBE modes: use stored ones if available and matching, else compute.
+    bstars = if hasproperty(res.result, :eb_modes) &&
+                res.result.eb_modes !== nothing &&
+                length(res.result.eb_modes) == length(batch_infos)
+        res.result.eb_modes
+    else
+        ebe = ebe_options === nothing ? _default_ebe_options() : ebe_options
+        bstars_new, _ = _compute_bstars(dm, θu, constants_re, ll_cache, ebe, rng)
+        bstars_new
+    end
+
+    if _any_batch_too_large(dm, batch_infos, level, 10_000)
+        @warn "get_loglikelihood_quadrature: one or more batches have > 10,000 quadrature nodes. " *
+              "Consider reducing `level` or checking your RE batch structure."
+    end
+
+    total = 0.0
+    for (bi, info) in enumerate(batch_infos)
+        if info.n_b == 0
+            s = 0.0
+            empty_b = Float64[]
+            for i in info.inds
+                η_i = _build_eta_ind(dm, i, info, empty_b, const_cache, θu_re)
+                lli = _loglikelihood_individual(dm, i, θu_re, η_i, ll_cache)
+                !isfinite(lli) && return -Inf
+                s += lli
+            end
+            total += s
+        else
+            b_star = bstars[bi]
+            re_measure = build_centered_re_measure(b_star, info, bi, θu_re, const_cache, dm, ll_cache;
+                                                    jitter=jitter)
+            sgrid = level isa Int ? get_sparse_grid(info.n_b, level) :
+                                    _build_anisotropic_batch_grid(dm, info, level)
+            bll = batch_loglik_ghq(dm, info, θu_re, re_measure, sgrid, const_cache, ll_cache)
+            bll == -Inf && return -Inf
+            total += bll
+        end
+    end
+    return total
+end
+
+function get_loglikelihood_quadrature(res::FitResult;
+                                       level::Union{Int, NamedTuple}=3,
+                                       constants_re::NamedTuple=NamedTuple(),
+                                       ode_args::Tuple=(),
+                                       ode_kwargs::NamedTuple=NamedTuple(),
+                                       serialization::SciMLBase.EnsembleAlgorithm=EnsembleSerial(),
+                                       ebe_options::Union{Nothing, EBEOptions}=nothing,
+                                       rng::AbstractRNG=Random.default_rng(),
+                                       jitter::Float64=1e-6)
+    dm = res.data_model
+    dm === nothing && error("This fit result does not store a DataModel; call get_loglikelihood_quadrature(dm, res) instead.")
+    return get_loglikelihood_quadrature(dm, res; level=level, constants_re=constants_re,
+                                        ode_args=ode_args, ode_kwargs=ode_kwargs,
+                                        serialization=serialization, ebe_options=ebe_options,
+                                        rng=rng, jitter=jitter)
 end
 
 function get_re_covariate_usage(res::FitResult; dm::Union{Nothing, DataModel}=nothing)

@@ -1210,6 +1210,58 @@ function _laplace_logf_batch(dm::DataModel,
     return ll
 end
 
+function _laplace_obsll_batch(dm::DataModel,
+                              batch_info::_LaplaceBatchInfo,
+                              θ::ComponentArray,
+                              b,
+                              const_cache::LaplaceConstantsCache,
+                              cache::_LLCache)
+    T_ll = promote_type(eltype(θ), eltype(b))
+    ll = zero(T_ll)
+    θ_re = _symmetrize_psd_params(θ, dm.model.fixed.fixed)
+    for i in batch_info.inds
+        η_ind = _build_eta_ind(dm, i, batch_info, b, const_cache, θ_re)
+        lli = _loglikelihood_individual(dm, i, θ_re, η_ind, cache)
+        lli == -Inf && return -Inf
+        ll += lli
+    end
+    return ll
+end
+
+# Returns only the RE prior log-density term for a batch (no observation likelihood).
+# Used by build_centered_re_measure for the AGHQ logcorrection.
+function _re_prior_logf_batch(dm::DataModel,
+                               batch_info::_LaplaceBatchInfo,
+                               θ::ComponentArray,
+                               b,
+                               const_cache::LaplaceConstantsCache,
+                               ll_cache::_LLCache)
+    T_ll = promote_type(eltype(θ), eltype(b))
+    ll = zero(T_ll)
+    model_funs = ll_cache.model_funs
+    helpers = ll_cache.helpers
+    θ_re = _symmetrize_psd_params(θ, dm.model.fixed.fixed)
+    dists_builder = get_create_random_effect_distribution(dm.model.random.random)
+    re_cache = dm.re_group_info.laplace_cache
+    re_names = re_cache.re_names
+    for (ri, re) in enumerate(re_names)
+        info = batch_info.re_info[ri]
+        isempty(info.map.levels) && continue
+        for (li, level_id) in enumerate(info.map.levels)
+            rep_idx = info.reps[li]
+            const_cov = dm.individuals[rep_idx].const_cov
+            dists = dists_builder(θ_re, const_cov, model_funs, helpers)
+            dist = getproperty(dists, re)
+            v = _re_value_from_b(info, level_id, b)
+            v === nothing && continue
+            lp = logpdf(dist, v)
+            isfinite(lp) || return -Inf
+            ll += lp
+        end
+    end
+    return ll
+end
+
 function _laplace_solve_batch!(dm::DataModel,
                                batch_info::_LaplaceBatchInfo,
                                θ::ComponentArray,

@@ -69,6 +69,10 @@ TESTS=(
   estimation_mcem_tests.jl
   estimation_mcem_is_tests.jl
   estimation_saem_tests.jl
+  saem_schedule_tests.jl
+  saem_multichain_tests.jl
+  saem_sa_anneal_tests.jl
+  saem_var_lb_tests.jl
   estimation_saem_autodetect_tests.jl
   estimation_saem_suffstats_tests.jl
   saem_schedule_tests.jl

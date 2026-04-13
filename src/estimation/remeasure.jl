@@ -544,6 +544,73 @@ function build_re_measure_from_batch(
 end
 
 # ---------------------------------------------------------------------------
+# CenteredREMeasure: AGHQ measure centred at EBE mode b* with local curvature
+# ---------------------------------------------------------------------------
+
+"""
+    CenteredREMeasure{T, LT, F} <: AbstractREMeasure
+
+Adaptive Gauss-Hermite Quadrature (AGHQ) measure for a batch of random effects.
+
+Unlike `GaussianRE` (which centres nodes at the prior mean μ), this measure
+centres nodes at the empirical-Bayes mode **b***, scaled by
+**S = chol(-H)^{-1}** where H is the Hessian of log p(b | y, θ) at b*.
+
+The change-of-variables correction is
+
+    logcorrection(z) = log p(b* + Sz | θ) + log|det(S)| + ½‖z‖² + ½d·log(2π)
+
+which accounts for the RE prior density, the Jacobian of the mapping, and
+the division by the N(0,I) quadrature measure.
+
+For a Gaussian prior this reduces to `logcorrection = 0` as expected.
+"""
+struct CenteredREMeasure{T<:Number, LT<:LowerTriangular{T, Matrix{T}}, F} <: AbstractREMeasure
+    b_star        :: Vector{T}    # EBE mode (free RE space)
+    S             :: LT           # chol(-H)^{-1}: S*S' ≈ posterior covariance
+    log_det_S     :: T            # log|det(S)|
+    re_prior_logf :: F            # closure: b -> Σ_levels log p(b_level | θ)
+    n_b           :: Int
+end
+
+transform(re::CenteredREMeasure, z::AbstractVector) = re.b_star + re.S * z
+function logcorrection(re::CenteredREMeasure, z::AbstractVector)
+    b = re.b_star + re.S * z
+    re.re_prior_logf(b) + re.log_det_S + 0.5 * sum(abs2, z) + 0.5 * length(z) * log(2π)
+end
+Base.eltype(::CenteredREMeasure{T}) where T = T
+
+"""
+    build_centered_re_measure(b_star, batch_info, bi, θu, const_cache, dm, ll_cache; jitter, max_tries)
+
+Build a `CenteredREMeasure` for AGHQ, centering the quadrature nodes at `b_star`
+and scaling by the inverse Cholesky of the negative log-posterior Hessian at b*.
+"""
+function build_centered_re_measure(
+    b_star::AbstractVector,
+    batch_info::_LaplaceBatchInfo,
+    bi::Int,
+    θu::ComponentArray,
+    const_cache,
+    dm::DataModel,
+    ll_cache::_LLCache;
+    jitter::Float64=1e-6,
+    max_tries::Int=6,
+)
+    T = eltype(b_star)
+    H = _laplace_hessian_b(dm, batch_info, θu, b_star, const_cache, ll_cache, nothing, bi)
+    chol, _ = _laplace_cholesky_negH(H; jitter=jitter, max_tries=max_tries)
+    (chol === nothing || chol.info != 0) &&
+        error("AGHQ: Cholesky of negative log-posterior Hessian failed at EBE mode for batch $bi. " *
+              "The posterior may be flat or b* is not a true mode. Try increasing `jitter`.")
+    L = chol.L  # lower triangular, L*L' = -H
+    S = LowerTriangular(inv(Matrix(L)))
+    log_det_S = -sum(log, diag(L))
+    re_prior_logf = b -> _re_prior_logf_batch(dm, batch_info, θu, b, const_cache, ll_cache)
+    return CenteredREMeasure(Vector{T}(b_star), S, T(log_det_S), re_prior_logf, batch_info.n_b)
+end
+
+# ---------------------------------------------------------------------------
 # Pre-validation: check all RE distributions are supported
 # ---------------------------------------------------------------------------
 
